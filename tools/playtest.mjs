@@ -7,6 +7,7 @@
 // combat    rules, layout and camera in dev-only ?fight= encounters (dev server only)
 // save      stranger -> start -> real fight -> saved -> reload -> restored; two visitors isolated
 // viewports the save-loop core actions at 1920x1080 and on a 390x844 touch phone, plus a resize mid-fight
+// prodguard production only: ?fight= must not start a test fight
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 
@@ -438,6 +439,14 @@ async function viewportSuite() {
   } else check(false, "phone: walked into a fight");
 }
 
+async function prodGuardSuite() {
+  console.log("\n# production build: test entry points are off");
+  await setViewport(1280, 800);
+  const g = await open("?fight=3,1,1100,650");
+  const text = await waitText("#panel", /Start a run|Welcome back|Your last run/);
+  check(/Start a run|Welcome back|Your last run/.test(text) && g.saveStatus !== "off" && g.phase === null, "?fight= is ignored: the normal start screen shows and saving stays on");
+}
+
 async function main() {
   await connect();
   await send("Page.enable");
@@ -447,6 +456,7 @@ async function main() {
     if (s === "combat") await combatSuite();
     else if (s === "save") await saveSuite();
     else if (s === "viewports") await viewportSuite();
+    else if (s === "prodguard") await prodGuardSuite();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }
