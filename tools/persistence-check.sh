@@ -56,5 +56,21 @@ docker build -q --no-cache -t "$IMG" . >/dev/null
 up
 check "after rebuild + new container"
 
+echo "# a save written by the v1 game, planted on the volume, loads as v2"
+C=$(mktemp)
+curl -s -c "$C" -b "$C" "$URL/api/save" >/dev/null
+token=$(awk '$6 == "cc_visitor" { print $7 }' "$C")
+vid=$(node -e 'console.log(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$token")
+v1='{"v":1,"runId":"run_oldsave1","runNumber":2,"startedAt":1700000000000,"savedAt":1700000100000,"reason":"victory","outcome":"playing","player":{"hp":13,"x":900,"y":500},"enemies":{"west-1":0,"west-2":0,"south-1":4,"north-1":6,"north-2":6,"north-3":6,"lair-guard":6,"lair-boss":40},"stats":{"fights":3,"wins":2,"flees":1,"kills":2}}'
+docker exec "$NAME" node --disable-warning=ExperimentalWarning -e '
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync("/data/game.sqlite");
+  db.prepare("INSERT INTO saves (visitor_id, revision, data, updated_at) VALUES (?, 1, ?, ?)").run(process.argv[1], process.argv[2], Date.now());
+' "$vid" "$v1"
+c=$(curl -s -b "$C" "$URL/api/save" | json 'j.save.v+","+j.save.enemies["west-1"]+","+j.save.enemies["south-1"]+","+j.save.enemies["north-mage"]+","+j.save.player.hp+","+JSON.stringify(j.save.phases)')
+rm -f "$C"
+[ "$c" = '2,0,4,9,13,{"ridge-captain":0,"lair-boss":0}' ] || fail "v1 save loaded as $c"
+echo "  ok   v1 save -> $c"
+
 cleanup
 echo "persistence checks passed"

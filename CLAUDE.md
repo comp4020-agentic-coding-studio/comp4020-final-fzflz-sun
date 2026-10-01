@@ -3,8 +3,10 @@
 The argument for what good means is `README.md`. These are the standards a
 change must meet; each one came from a playtest correction or a bug that
 reached a build. Pure rules live in `src/cards.ts`, `src/turn.ts`,
-`src/formation.ts`, `src/separation.ts` and `src/save.ts`; keep them free of
-Kaplay and the DOM so they stay testable.
+`src/combat.ts`, `src/encounter.ts`, `src/formation.ts`, `src/separation.ts`,
+`src/save.ts` and the data in `src/world.ts`; keep them free of Kaplay and the
+DOM so they stay testable, and keep every fight state change in
+`src/combat.ts` (main.ts animates, it doesn't decide).
 
 ## Combat must never punish thinking
 
@@ -19,6 +21,30 @@ Kaplay and the DOM so they stay testable.
   survives. Never make flee free.
 - Every fight participant must show its intent with exact numbers; the boss's
   charge names the hit it leads to.
+
+## Monsters are data, and each one changes the plan
+
+- Units are described in `src/world.ts`: tier (normal / elite / boss) is how
+  dangerous, role (grunt, swarmling, mage, captain, warlord) is what it does,
+  `pattern` is its action cycle. Add or tune a unit there, not in main.ts.
+- A new unit or camp needs a reason in play: what card, target order or Guard
+  timing it asks for. Check it with `node tools/balance.ts` (whole runs must
+  stay winnable) and `node tools/balance.ts hand` (does one hand play
+  differently against it?), then by playing.
+- Skirmishers notice and give up alone. A pack alerts only its own members,
+  gives up together past its leash, and joins a fight whole. A fight's
+  roster is the trigger, nearby chasers and their alerted packs: no
+  recursion, no duplicates, fixed once formation starts (`src/encounter.ts`).
+- A fallen enemy is *downed*: it keeps its slot and is shown as a body until
+  the fight ends, and only then is it confirmed dead and counted, once by
+  stable id. Never destroy an enemy mid-fight.
+- A mage's revive follows `src/combat.ts` exactly: same-pack grunt or
+  swarmling that fell on an earlier turn, half HP, one success per mage and
+  one per member per fight, shown with its target before the enemy turn,
+  cancelled if the mage falls, fizzles (never re-targets) if the target is
+  up, and the revived unit waits a turn. Confirmed-dead enemies never return.
+- Elite and boss phases persist across flee, reload and new fights; a charge
+  that resolved is followed by its heavy hit, never reset.
 
 ## Cards are conserved
 
@@ -45,7 +71,11 @@ Kaplay and the DOM so they stay testable.
 ## Saves are honest
 
 - Enemies are saved by the stable ids in `src/world.ts`, never by runtime
-  `enemyId`. Never renumber or reuse an id.
+  `enemyId`. Never renumber or reuse an id; a new member gets a new id.
+- Changing the save shape, an enemy's max HP or the set of ids needs a version
+  bump and a migration in `upgradeSave` (dead stays dead, wounded HP scaled,
+  new members dead in a cleared camp or an ended run), applied by the server
+  on read, with tests (`src/save.test.ts`, `src/store-migration.test.ts`).
 - Save only at stable moments (run start, fight trigger, victory, flee,
   death). Never save formation slots, half a resolve, or animation state.
 - Load before starting: a default new game must never overwrite a save.
@@ -87,13 +117,15 @@ pnpm dev                            # app + API on :8080 (saves in .data/)
 APP_URL=http://localhost:8080 pnpm check   # rules + spec/ against the running app
 pnpm playtest                       # real Chrome: combat, save loop, both viewports
 node tools/playtest.mjs --suite=race   # new run vs a slow / offline final save
+node tools/playtest.mjs --suite=monsters,groups   # packs, revive, elite cycle; every camp at both viewports
+node tools/balance.ts [runs]           # whole runs with the real rules: must stay winnable
 sh tools/persistence-check.sh       # saves survive restart and rebuild (Docker)
 pnpm check:evidence
 ```
 
 For the production image: `docker build -t app . && docker run -p 8090:8080
 --tmpfs /data app`, then `APP_URL=http://localhost:8090 pnpm check` and
-`node tools/playtest.mjs http://localhost:8090/ --suite=prodguard,save,viewports`.
+`PLAYTEST_CONTAINER=<name> node tools/playtest.mjs http://localhost:8090/ --suite=prodguard,save,viewports,race,legacy`.
 Report what was actually run, and say plainly what wasn't verified.
 
 ## Process

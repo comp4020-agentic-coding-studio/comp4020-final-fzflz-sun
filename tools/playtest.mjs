@@ -10,8 +10,10 @@
 // prodguard production only: ?fight= must not start a test fight
 // monsters  splitting skirmishers, whole packs, mage revive / cancel, elite cycle across flee + reload (dev server)
 // groups    each camp's fight + a big mixed fight laid out at 1920x1080 and 390x844 (dev server)
+// legacy    a v1-era save planted in the running container continues correctly (PLAYTEST_CONTAINER=<name>)
 // race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
@@ -208,13 +210,16 @@ async function fightToEnd(useTaps) {
   return game();
 }
 
-/** Starts a real fight with the West camp by tapping toward it (tap-to-move), following the camp pointer when it's off screen. */
+/** Starts a real fight with the nearest camp by tapping toward it (tap-to-move), following the camp pointer when it's off screen. */
 async function walkIntoFight() {
   for (let i = 0; i < 80; i++) {
     const g = await game();
     if (g.phase) return g;
-    const west = g.enemies.filter((e) => e.spawnId?.startsWith("west"));
-    const t = west[0] ?? g.enemies[0];
+    // whichever map enemy is nearest (the camp pointer only shows when that one is off screen)
+    const near = g.enemies
+      .filter((e) => e.spawnId)
+      .sort((a, b) => Math.hypot(a.x - g.player.x, a.y - g.player.y) - Math.hypot(b.x - g.player.x, b.y - g.player.y));
+    const t = near[0];
     if (!t) return g;
     const s = g.safe;
     const onScreen = t.sx > s.x0 && t.sx < s.x1 && t.sy > s.y0 && t.sy < s.y1;
@@ -500,8 +505,9 @@ async function raceSuite() {
   // then trigger one more checkpoint-worthy event: walking into the next fight saves "engage"
   await network({});
   await network({ offline: true });
-  await walkIntoFight();
-  await waitFor((s) => s.phase === "playerTurn", 8000);
+  const second = await walkIntoFight();
+  const inFight = await waitFor((s) => s.phase === "playerTurn", 8000);
+  if (!inFight) console.log("  no fight after walking:", await evaluate(`document.getElementById("screen").hidden + " | " + document.getElementById("panel").innerText.slice(0,120)`), JSON.stringify({ pointer: second?.pointer, run: second?.run, phase: second?.phase, player: second?.player, enemies: second?.enemies.map((e) => [e.spawnId, Math.round(e.x), Math.round(e.y), e.state]).slice(0, 4) }));
   await sleep(500);
   const offlinePill = await evaluate(`document.getElementById("savePill").innerText`);
   check(/retrying|Not saved/i.test(offlinePill), `offline, the pill says the checkpoint isn't saved (“${offlinePill}”)`);
@@ -716,6 +722,40 @@ async function groupLayoutSuite() {
   await setViewport(1280, 800);
 }
 
+async function legacySuite() {
+  console.log("\n# a save from the v1 game continues correctly (needs PLAYTEST_CONTAINER = the running image)");
+  const container = process.env.PLAYTEST_CONTAINER;
+  if (!check(!!container, "PLAYTEST_CONTAINER is set")) return;
+  await setViewport(1280, 800);
+  await send("Network.enable");
+  await send("Network.clearBrowserCookies");
+  await open("");
+  await waitText("#panel", /Start a run/);
+  const cookie = (await send("Network.getCookies", { urls: [BASE] })).result.cookies.find((c) => c.name === "cc_visitor");
+  const vid = createHash("sha256").update(cookie.value).digest("hex");
+  const v1 = {
+    v: 1, runId: "run_oldsave1", runNumber: 2, startedAt: 1700000000000, savedAt: 1700000100000, reason: "victory", outcome: "playing",
+    player: { hp: 13, x: 700, y: 700 },
+    enemies: { "west-1": 0, "west-2": 0, "south-1": 4, "north-1": 6, "north-2": 6, "north-3": 6, "lair-guard": 6, "lair-boss": 40 },
+    stats: { fights: 3, wins: 2, flees: 1, kills: 2 },
+  };
+  execFileSync("docker", ["exec", container, "node", "--disable-warning=ExperimentalWarning", "-e",
+    `const{DatabaseSync}=require("node:sqlite");new DatabaseSync("/data/game.sqlite").prepare("INSERT INTO saves (visitor_id, revision, data, updated_at) VALUES (?, 1, ?, ?)").run(process.argv[1], process.argv[2], Date.now())`,
+    vid, JSON.stringify(v1)]);
+  await send("Page.reload");
+  await sleep(500);
+  const text = await waitText("#panel", /Welcome back/);
+  check(/Run #2/.test(text) && /HP 13\/24/.test(text) && /West camp/.test(text), "the start screen shows the old run: #2, HP 13, West camp cleared");
+  await shot("l01_legacy_title");
+  await tapEl("#go");
+  const g = await waitFor((s) => s.run === "playing" && !s.screen);
+  const ids = new Set(g.enemies.map((e) => e.spawnId));
+  check(!ids.has("west-1") && !ids.has("west-2"), "enemies killed in the v1 run stay dead");
+  check(g.enemies.find((e) => e.spawnId === "south-1")?.hp === 4, "a wounded v1 enemy keeps its HP");
+  check(ids.has("north-mage") && ids.has("swarm-1") && ids.has("ridge-captain"), "new camps and the new mage are there to fight");
+  check(g.hp === 13 && g.stats.kills === 2, `player HP and stats carried over (HP ${g.hp}, kills ${g.stats.kills})`);
+}
+
 async function prodGuardSuite() {
   console.log("\n# production build: test entry points are off");
   await setViewport(1280, 800);
@@ -737,6 +777,7 @@ async function main() {
     else if (s === "race") await raceSuite();
     else if (s === "monsters") await monstersSuite();
     else if (s === "groups") await groupLayoutSuite();
+    else if (s === "legacy") await legacySuite();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }

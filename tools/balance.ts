@@ -10,7 +10,8 @@ import {
 } from "../src/combat.ts";
 import { ENEMY_SPAWNS, PLAYER_MAX_HP, UNITS } from "../src/world.ts";
 
-const RUNS = Number(process.argv[2] ?? 2000);
+const DEMO = process.argv[2] === "hand";
+const RUNS = DEMO ? 0 : Number(process.argv[2] ?? 2000);
 const HEAL = process.argv[3] ?? "none";
 
 function rng(seed: number): Rng {
@@ -40,6 +41,7 @@ const value = (u: CombatUnit) => {
   return dmg + (u.role === "mage" ? 2 : 0);
 };
 
+const PLAYS: string[] = [];
 /** Greedy turn: Focus first; kill what dies to a Strike (most dangerous first); Cleave a crowd; Guard a big hit; else Strike the most dangerous. */
 function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
   for (let guardDone = false; ;) {
@@ -50,6 +52,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
     const incoming = st.reduce((s, u) => s + (u.intent?.kind === "attack" ? u.intent.value : 0), 0) - f.player.block;
     const play = (i: number, fn: () => void) => {
       const card = takeFromHand(piles, i)!;
+      PLAYS.push(card.name);
       energy -= card.cost;
       fn();
       settlePlayed(piles, card);
@@ -68,6 +71,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
       continue;
     }
     if (idx("Strike") >= 0 && energy >= 1 && strikeable.length) {
+      PLAYS.push(`->${strikeable[0].key}`);
       play(idx("Strike"), () => hitUnit(f, strikeable[0].key, 6));
       continue;
     }
@@ -78,6 +82,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
     }
     if (idx("Strike") >= 0 && energy >= 1) {
       const t = st.slice().sort((a, b) => value(b) - value(a) || a.hp - b.hp)[0];
+      PLAYS.push(`->${t.key}`);
       play(idx("Strike"), () => hitUnit(f, t.key, 6));
       continue;
     }
@@ -143,6 +148,43 @@ function runOnce(seed: number) {
     if (HEAL.startsWith("win:")) player.hp = Math.min(PLAYER_MAX_HP, player.hp + Number(HEAL.slice(4)));
   }
   return { won: true, diedAt: null, taken, turns, hpLeft: player.hp };
+}
+
+if (DEMO) {
+  // One fixed hand against each group, two turns: what does the policy do differently?
+  const { CARD_LIBRARY } = await import("../src/cards.ts");
+  const hand = [CARD_LIBRARY.strike, CARD_LIBRARY.strike, CARD_LIBRARY.cleave, CARD_LIBRARY.guard];
+  const groups: [string, string[], Record<string, number>][] = [
+    ["lone grunt", ["west-1"], {}],
+    ["swarm x3", ["swarm-1", "swarm-2", "swarm-3"], {}],
+    ["mage + 2 grunts", ["north-1", "north-2", "north-mage"], {}],
+    ["captain + escort, captain about to charge", ["ridge-1", "ridge-captain", "ridge-2"], { "ridge-captain": 1 }],
+    ["captain + escort, heavy hit due", ["ridge-1", "ridge-captain", "ridge-2"], { "ridge-captain": 2 }],
+    ["warlord + guard", ["lair-guard", "lair-guard-2", "lair-boss"], {}],
+  ];
+  console.log("same opening hand every time: Strike, Strike, Cleave, Guard (3 energy)\n");
+  for (const [name, ids, ph] of groups) {
+    const units = ids.map((id) => {
+      const sp = ENEMY_SPAWNS.find((x) => x.id === id)!;
+      return makeUnit(id, sp.role, sp.group, undefined, ph[id] ?? 0);
+    });
+    const f = beginFight(units, { hp: PLAYER_MAX_HP, block: 0 });
+    const lines: string[] = [];
+    for (let t = 1; t <= 2 && !isWon(f); t++) {
+      startPlayerTurn(f);
+      const intents = units.filter((u) => !u.downed).map((u) => `${u.key}:${u.intent?.kind === "attack" ? `atk${u.intent.value}` : u.intent?.kind === "revive" ? `revive ${u.intent.target}` : u.intent?.kind}`).join(" ");
+      const piles = { draw: [], hand: hand.slice(), discard: [], exhaust: [] } as Piles;
+      PLAYS.length = 0;
+      playTurn(f, piles, rng(1), 3);
+      lines.push(`  turn ${t} [${intents}] -> ${PLAYS.join(" ").replace(/ ->/g, "->")}${f.player.block ? ` (block ${f.player.block})` : ""}`);
+      if (isWon(f)) break;
+      beginEnemyTurn(f);
+      for (const ev of planEnemyTurn(f).events) applyEnemyEvent(f, ev);
+      f.player.block = 0;
+    }
+    console.log(`${name}:\n${lines.join("\n")}\n`);
+  }
+  process.exit(0);
 }
 
 const tally = { reviveShown: 0, reviveDone: 0, reviveCancelled: 0, heavyLanded: 0, heavyShown: 0, guardOnHeavy: 0 };
