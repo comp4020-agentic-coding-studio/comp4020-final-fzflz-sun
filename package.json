@@ -4,16 +4,24 @@
   "type": "module",
   "scripts": {
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
+    "dev": "vite",
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "playtest": "node tools/playtest.mjs"
+  },
+  "dependencies": {
+    "kaplay": "^3001.0.19"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "jsdom": "^30.1.0",
     "typescript": "^6.0.3",
+    "vite": "^7.0.0",
     "vitest": "^5.0.1"
   },
   "engines": {
