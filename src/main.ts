@@ -14,6 +14,7 @@ import {
 import { BOSS_BOX, boxAt, clampCam, formationBounds, layoutFormation, planCamera, TRASH_BOX, type Rect, type Viewport } from "./formation.ts";
 import { SaveClient, type SavePayload, type SaveStatus } from "./net.ts";
 import { clearedAreas, killedCount, newRun, type CheckpointReason, type SaveData } from "./save.ts";
+import { selectRoster } from "./encounter.ts";
 import { separate } from "./separation.ts";
 import {
   type Intent,
@@ -73,7 +74,6 @@ const BOSS_PATTERN: Intent[] = [
 ];
 
 const LEASH_FACTOR = 1.35;
-const JOIN_RADIUS = 260;
 const FLEE_IMMUNITY = 2.5;
 const LOAD_IMMUNITY = 2.5; // after restoring a checkpoint, a moment to get your bearings
 const END_GRACE = 0.3;
@@ -497,13 +497,11 @@ function saveCheckpoint(reason: CheckpointReason) {
 // ---------- encounter flow ----------
 
 function tryTriggerEncounter(now: number) {
-  const instigator = enemies.find(
-    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= e.engageRange,
+  const roster = selectRoster(
+    enemies.map((e) => ({ ref: e, alive: e.exists(), state: e.state, x: e.pos.x, y: e.pos.y, engageRange: e.engageRange })),
+    player.pos,
   );
-  if (!instigator) return;
-  const roster = enemies.filter(
-    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= JOIN_RADIUS,
-  );
+  if (!roster) return;
 
   // The pre-fight checkpoint: closing the tab mid-fight comes back to here.
   if (run) run.stats.fights++;
@@ -930,7 +928,7 @@ function renderHud() {
   setText(
     ui.hint,
     runState === "playing" && !cur
-      ? "Move: WASD / arrow keys, or tap and hold on the map. Lure enemies; everyone chasing you joins the fight."
+      ? "Move: WASD / arrow keys, or tap and hold on the map. When an enemy reaches you, nearby enemies that are chasing you join the fight."
       : "",
   );
 }
@@ -991,7 +989,7 @@ function hideScreen() {
 const HOW_TO = `
 <h2>How to play</h2>
 <ul>
-  <li><b>Goal:</b> clear the four enemy camps. Walk near enemies to draw them out; everyone chasing you when one reaches you joins that fight, so you choose how many you take on.</li>
+  <li><b>Goal:</b> clear the four enemy camps. Walk near enemies to draw them out. When one reaches you, the enemies close by that are chasing you join that fight; ones further back keep chasing after it ends, so you choose how many you take on.</li>
   <li><b>Move:</b> WASD or arrow keys, or tap and hold on the map.</li>
   <li><b>Fight:</b> each turn you get 3 energy and 4 cards. Tap an enemy (or ←/→) to target, tap a card (or 1-4) to play it. Each enemy shows what it will do; nothing happens until you <b>End turn</b> (Space).</li>
   <li><b>Block</b> soaks damage during the enemy turn, then clears. <b>Flee</b> (F): enemies still take their shown actions, then you escape if you survive.</li>

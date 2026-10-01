@@ -20,10 +20,10 @@ up later, and not be hurried while they think.
    timers, no regeneration, no enemy moves. *Enforced:* the phase machine
    tests in `src/turn.test.ts`, plus a browser check that two idle seconds
    change nothing.
-2. **You choose the size of every fight.** Every enemy chasing you when one
-   catches you joins the fight; idle enemies don't. Splitting a pack, or
-   pulling it whole for a Cleave, is the skill. *Judged:* in
-   playtests the roster has to be predictable before contact.
+2. **You choose the size of every fight.** When an enemy reaches you, the
+   enemies near you that are chasing you join; idle ones don't. Splitting a
+   pack is the skill. *Enforced:* the rule
+   in `src/encounter.test.ts`. *Judged:* whether it feels predictable.
 3. **Every enemy's next move is readable.** Enemies show their intent with
    exact numbers, and no two bodies, HP labels or intents overlap, at
    1920x1080 or 390x844. Fights too big to lay out move to a side list
@@ -52,8 +52,8 @@ You can explore, fight, flee, die, and come back to a restored run. Closing the 
 started. Starting a new run keeps the old one in your history; only "Erase my
 saved data", confirmed by typing ERASE, deletes anything.
 
-Not built yet: anything shared between players (that's crit 9's real-time
-work), accounts, art, and content beyond four camps and one boss.
+Not built yet: anything shared between players (crit 9), accounts, art,
+and content beyond four camps and one boss.
 
 ## Where these ideas came from
 
