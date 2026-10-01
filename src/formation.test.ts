@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FHD_VIEWPORT, PHONE_VIEWPORT, VIEWPORT, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
 import {
   BOSS_BOX,
+  boxFor,
   PLAYER_BOX,
   TRASH_BOX,
   type Unit,
@@ -36,12 +37,12 @@ function crowd(anchor: V, trash: number, withBoss: boolean, spread = 30): Unit[]
     y: Math.min(Math.max(anchor.y + towardCentre.y * 40 + ((i * 53) % 7) * spread * 0.2, 14), WORLD_HEIGHT - 14),
   });
   if (withBoss) units.push({ id: id++, isBoss: true, pos: at(99) });
-  for (let i = 0; i < trash; i++) units.push({ id: id++, isBoss: false, pos: at(i) });
+  for (let i = 0; i < trash; i++) units.push({ id: id++, isBoss: false, elite: i === 2, pos: at(i) });
   return units;
 }
 
 function footprint(u: Unit, p: V) {
-  return boxAt(p, u.isBoss ? BOSS_BOX : TRASH_BOX);
+  return boxAt(p, boxFor(u));
 }
 
 function inside(r: { x0: number; y0: number; x1: number; y1: number }, o: typeof r, tol = 0.5) {

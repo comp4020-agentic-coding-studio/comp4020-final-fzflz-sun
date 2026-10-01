@@ -16,7 +16,9 @@ export interface Box {
   bottom: number;
 }
 
-export const TRASH_BOX: Box = { left: -36, right: 36, top: -70, bottom: 18 };
+export const TRASH_BOX: Box = { left: -40, right: 40, top: -70, bottom: 18 };
+/** elites: a bigger body plus an ELITE tag above the intent */
+export const ELITE_BOX: Box = { left: -48, right: 48, top: -96, bottom: 26 };
 export const BOSS_BOX: Box = { left: -58, right: 58, top: -108, bottom: 32 };
 export const PLAYER_BOX: Box = { left: -24, right: 24, top: -24, bottom: 24 };
 const BOX_PAD = 6;
@@ -35,6 +37,7 @@ export interface Viewport {
 export interface Unit {
   id: number;
   isBoss: boolean;
+  elite?: boolean;
   pos: V;
 }
 
@@ -42,6 +45,10 @@ export interface Formation {
   slots: Map<number, V>;
   overflow: number[];
   stage: Rect;
+}
+
+export function boxFor(u: { isBoss: boolean; elite?: boolean }): Box {
+  return u.isBoss ? BOSS_BOX : u.elite ? ELITE_BOX : TRASH_BOX;
 }
 
 export function boxAt(p: V, b: Box): Rect {
@@ -146,8 +153,9 @@ export function layoutFormation(units: Unit[], anchor: V, v: Viewport, maxVisibl
   const overflow: number[] = [];
   let visibleCount = 0;
 
-  for (const b of units.filter((u) => u.isBoss)) {
-    const p = visibleCount < maxVisible ? take(BOSS_BOX) : null;
+  // Bosses, then elites, get the best slots: they're what the fight is about.
+  for (const b of [...units.filter((u) => u.isBoss), ...units.filter((u) => !u.isBoss && u.elite)]) {
+    const p = visibleCount < maxVisible ? take(boxFor(b)) : null;
     if (p) {
       slots.set(b.id, p);
       visibleCount++;
@@ -157,7 +165,7 @@ export function layoutFormation(units: Unit[], anchor: V, v: Viewport, maxVisibl
   // Nearest trash get the visible slots; slots are then handed out in angular
   // order so left-hand enemies stay on the left and paths don't cross.
   const trash = units
-    .filter((u) => !u.isBoss)
+    .filter((u) => !u.isBoss && !u.elite)
     .sort((a, b) => dist(a.pos, anchor) - dist(b.pos, anchor));
   const trashSlots: V[] = [];
   for (let i = 0; i < trash.length && visibleCount < maxVisible; i++) {
@@ -191,7 +199,7 @@ export function formationBounds(units: Unit[], slots: Map<number, V>, anchor: V)
   const rects = [boxAt(anchor, PLAYER_BOX)];
   for (const u of units) {
     const p = slots.get(u.id);
-    if (p) rects.push(boxAt(p, u.isBoss ? BOSS_BOX : TRASH_BOX));
+    if (p) rects.push(boxAt(p, boxFor(u)));
   }
   return {
     x0: Math.min(...rects.map((r) => r.x0)),
@@ -251,13 +259,17 @@ export function planCamera(
   // fit non-monotonic in scale, so an estimate can start past the answer.
   const floor = v.baseScale ?? zoom.min;
   let coreFit: { center: V; scale: number } | null = null;
+  let atFloor: { center: V; scale: number } | null = null;
   for (let scale = zoom.max; ; scale = Math.max(zoom.min, scale - 0.05)) {
     const plan = at(scale);
     if (fitsSafe(bounds, plan.center, scale, v)) return plan;
     if (!coreFit && core && fitsSafe(core, plan.center, scale, v)) coreFit = plan;
+    if (!atFloor && scale <= floor) atFloor = plan;
     // Below exploration zoom, a frame showing every enemy beats zooming out
     // further only to get a corner-pinned player clear of the HUD.
     if (coreFit && scale <= floor) return coreFit;
-    if (scale <= zoom.min) return coreFit ?? plan;
+    // Nothing fits even at the floor: zooming further out only shrinks the
+    // text, so keep exploration zoom unless the window really is too small.
+    if (scale <= zoom.min) return coreFit ?? atFloor ?? plan;
   }
 }

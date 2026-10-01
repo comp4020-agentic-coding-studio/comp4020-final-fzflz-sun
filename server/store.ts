@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { SaveData } from "../src/save.ts";
+import { upgradeSave, type SaveData } from "../src/save.ts";
 
 // One SQLite file on the /data volume (fly.toml), the only storage that
 // survives a restart or redeploy. Three tables: who (an anonymous visitor),
@@ -71,7 +71,8 @@ export function openStore(dataDir: string): Store {
 
   const getSave = (visitor: string) => {
     const row = selSave.get(visitor) as { revision: number; data: string } | undefined;
-    return row ? { revision: row.revision, save: JSON.parse(row.data) as SaveData } : null;
+    // Saves written by an older version are migrated on read (src/save.ts upgradeSave).
+    return row ? { revision: row.revision, save: upgradeSave(JSON.parse(row.data)) as SaveData } : null;
   };
 
   const write = (visitor: string, base: number, save: SaveData): number | null => {
