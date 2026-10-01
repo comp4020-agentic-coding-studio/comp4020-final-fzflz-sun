@@ -4,17 +4,19 @@
   "type": "module",
   "scripts": {
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
-    "dev": "vite",
+    "dev": "node --watch --disable-warning=ExperimentalWarning server/index.ts",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
-    "playtest": "node tools/playtest.mjs"
+    "playtest": "node tools/playtest.mjs",
+    "start": "NODE_ENV=production node --disable-warning=ExperimentalWarning server/index.ts"
   },
   "dependencies": {
-    "kaplay": "^3001.0.19"
+    "kaplay": "^3001.0.19",
+    "marked": "^18.0.14"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",
