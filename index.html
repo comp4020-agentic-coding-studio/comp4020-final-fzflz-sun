@@ -36,9 +36,10 @@
       #state { color: var(--accent); }
       #turn { color: var(--blue); }
       #piles, #progress { color: var(--dim); font-size: .85rem; }
-      #feedback { color: var(--bad); font-size: .9rem; min-height: 1.3em; }
+      #feedback { color: var(--bad); font-size: .9rem; min-height: 1.4em; }
       /* fixed line heights: the top bar must not change size when a fight starts, or the framing it was measured for goes stale */
-      #state, #turn, #piles, #progress { min-height: 1.3em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #stats > div { line-height: 1.4; }
+      #state, #turn, #piles, #progress { min-height: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       #meta { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; align-items: center; }
       #savePill { font-size: .8rem; padding: .25rem .55rem; border-radius: 999px; border: 1px solid var(--line); background: #1c1c22; pointer-events: auto; white-space: nowrap; }
       #savePill.ok { color: var(--good); border-color: #3c6b44; }
@@ -60,7 +61,8 @@
       #hint { color: var(--dim); font-size: .85rem; margin-bottom: .35rem; }
       #fightRow { display: flex; gap: .6rem; align-items: stretch; }
       #hand { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; flex: 1; max-width: 44rem; }
-      .card { display: flex; flex-direction: column; gap: .25rem; align-items: flex-start; text-align: left; min-height: 5.2rem; background: #2e3a52; border-color: #8090b0; }
+      /* fixed height: the dock must be the same size whatever the cards say, or a fight's framing goes stale */
+      .card { display: flex; flex-direction: column; gap: .25rem; align-items: flex-start; text-align: left; height: 6.6rem; overflow: hidden; box-sizing: border-box; background: #2e3a52; border-color: #8090b0; }
       .card .name { font-weight: 600; }
       .card .cost { color: var(--accent); font-size: .85rem; }
       .card .blurb { color: #cfd6e4; font-size: .82rem; }
@@ -93,15 +95,19 @@
       /* --- phones --- */
       @media (max-width: 640px) {
         :root { font-size: 14px; }
-        #topbar { padding: .4rem .5rem; }
-        #state, #turn, #piles, #progress { white-space: normal; }
+        /* fixed shape on phones: buttons on their own row, then one line per stat, so the
+           bar is the same height exploring and fighting (fight framing is measured from it) */
+        #topbar { padding: .4rem .5rem; flex-direction: column-reverse; align-items: stretch; gap: .3rem; }
+        #meta { justify-content: flex-end; flex-wrap: nowrap; }
+        #meta a, #meta button, #meta #savePill { min-height: 2.4rem; font-size: .8rem; }
+        #stats .big { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         #stats .big { font-size: .95rem; }
         #overflow { left: .5rem; right: .5rem; width: auto; }
         #overflow .list { grid-template-columns: 1fr 1fr; max-height: 5.6rem; }
         #fightRow { flex-direction: column-reverse; gap: .4rem; }
         #actions { grid-template-columns: 1fr 1fr; min-width: 0; }
         #hand { gap: .3rem; max-width: none; }
-        .card { min-height: 5.6rem; padding: .35rem .4rem; }
+        .card { height: 8rem; padding: .35rem .4rem; }
         .card .blurb { font-size: .75rem; }
         #dock { padding: .4rem .5rem; padding-bottom: max(.4rem, env(safe-area-inset-bottom)); }
       }

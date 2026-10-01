@@ -11,41 +11,59 @@ import {
   takeFromHand,
   totalCards,
 } from "./cards.ts";
-import { BOSS_BOX, boxAt, clampCam, formationBounds, layoutFormation, planCamera, TRASH_BOX, type Rect, type Viewport } from "./formation.ts";
+import {
+  applyEnemyEvent,
+  beginEnemyTurn,
+  beginFight,
+  DANGER_THRESHOLD,
+  endFight,
+  fightThreat,
+  hitUnit,
+  incomingDamage,
+  isWon,
+  makeUnit,
+  planEnemyTurn,
+  startPlayerTurn as rollTurn,
+  unitByKey,
+  type CombatUnit,
+  type EnemyEvent,
+  type Fight,
+} from "./combat.ts";
+import { boxAt, boxFor, clampCam, formationBounds, layoutFormation, planCamera, type Rect, type Viewport } from "./formation.ts";
 import { SaveClient, SaveFlowError, type SavePayload, type SaveStatus } from "./net.ts";
 import { clearedAreas, killedCount, newRun, type CheckpointReason, type SaveData } from "./save.ts";
-import { selectRoster } from "./encounter.ts";
+import { nextAIStates, selectRoster, type AIState, type Explorer, type PackInfo } from "./encounter.ts";
 import { separate } from "./separation.ts";
-import {
-  type Intent,
-  type Phase,
-  type PhaseEvent,
-  type ResolvePlan,
-  canAct as canActRule,
-  planResolve,
-  transition,
-} from "./turn.ts";
+import { type Phase, type PhaseEvent, canAct as canActRule, transition } from "./turn.ts";
 import {
   AREAS,
   ENEMY_SPAWNS,
+  GROUPS,
+  GROUP_BY_ID,
+  PHASED_IDS,
   PLAYER_EDGE,
   PLAYER_MAX_HP,
   PLAYER_START,
-  TRASH_HP,
+  UNITS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  groupAnchor,
+  type Role,
 } from "./world.ts";
 
-// Exploration is real-time (chase, leash, light separation); a fight locks the
-// roster, eases enemies into readable slots, then runs strict turns: player
-// turn -> enemy resolve (one action at a time) -> next turn. The run is saved
+// Exploration is real-time (chase, leash, light separation; packs alert and
+// give up together); a fight locks the roster, eases enemies into readable
+// slots, then runs strict turns through src/combat.ts: player turn -> enemy
+// turn (one action at a time) -> next turn. Fallen enemies stay in their slot
+// until the fight ends, because a mage may bring them back. The run is saved
 // on the server at stable checkpoints. HUD, hand and menus are HTML over the
 // canvas so they stay readable and tappable at any viewport size.
 
 const DEV = import.meta.env.DEV;
 const params = new URLSearchParams(location.search);
-// ?fight= is a development-only shortcut; it never runs (or saves) in production.
+// ?fight= and ?start= are development-only shortcuts; neither exists in production.
 const FIGHT_PARAM = DEV ? params.get("fight") : null;
+const START_PARAM = DEV ? params.get("start") : null;
 
 // ---------- tunables ----------
 
@@ -53,37 +71,18 @@ const PLAYER_SPEED = 220;
 const PLAYER_MAX_ENERGY = 3;
 const HAND_SIZE = 4;
 
-const TRASH_AGGRO_RANGE = 210;
-const TRASH_ENGAGE_RANGE = 40;
-const TRASH_SPEED = 100;
-const TRASH_ATK_DAMAGE = 3;
-const TRASH_RADIUS = 14;
-
-const BOSS_AGGRO_RANGE = 260;
-const BOSS_ENGAGE_RANGE = 46;
-const BOSS_SPEED = 78;
-const BOSS_ATTACK_DMG = 5;
-const BOSS_BIGATTACK_DMG = 12;
-const BOSS_DEFEND_BLOCK = 8;
-const BOSS_RADIUS = 28;
-const BOSS_PATTERN: Intent[] = [
-  { kind: "attack", value: BOSS_ATTACK_DMG },
-  { kind: "defend", value: BOSS_DEFEND_BLOCK },
-  { kind: "charge", value: 0 },
-  { kind: "attack", value: BOSS_BIGATTACK_DMG },
-];
-
-const LEASH_FACTOR = 1.35;
 const FLEE_IMMUNITY = 2.5;
 const LOAD_IMMUNITY = 2.5; // after restoring a checkpoint, a moment to get your bearings
 const END_GRACE = 0.3;
+/** a mage hangs back this far while a pack-mate is still chasing; alone, it closes in */
+const MAGE_FOLLOW_DISTANCE = 110;
+/** pack name + makeup shows on the ground when you're this close to its camp */
+const PACK_HINT_RANGE = 560;
 
-// Enemy-enemy spacing only (the player is never pushed). Trash-trash minimum
+// Enemy-enemy spacing only (the player is never pushed). Grunt-grunt minimum
 // is 14+14+6 = 34, under the 40 engage range, so a crowd can still close in.
 const SEPARATION_PADDING = 6;
 const SEPARATION_SPEED = 160;
-const BOSS_MASS = 2.2;
-const TRASH_MASS = 1;
 
 const FORM_DURATION = 0.3;
 const ENEMY_ACTION_GAP = 0.45;
@@ -91,15 +90,16 @@ const ENEMY_ACTION_GAP = 0.45;
 const CAM_LERP_RATE = 4;
 const CAM_MAX_ZOOM_SMALL = 1.5;
 const CAM_MAX_ZOOM_LARGE = 1.2;
-const BOSS_DANGER_BONUS = 3;
-const DANGER_THRESHOLD = 3;
 
-const FEEDBACK_MS = 1600;
+const FEEDBACK_MS = 1800;
 const HIT_FLASH_DURATION = 0.15;
 
-// Label offsets match TRASH_BOX / BOSS_BOX in formation.ts.
-const TRASH_LABELS = { hp: -24, intent: -42, marker: -60 };
-const BOSS_LABELS = { hp: -40, intent: -68, marker: -98 };
+// Label offsets match TRASH_BOX / ELITE_BOX / BOSS_BOX in formation.ts.
+const LABELS = {
+  unit: { hp: -24, intent: -42, tag: -42, marker: -60 },
+  elite: { hp: -32, intent: -52, tag: -74, marker: -88 },
+  boss: { hp: -40, intent: -68, tag: -68, marker: -98 },
+};
 
 // ---------- DOM ----------
 
@@ -149,9 +149,18 @@ const k = kaplay({
 });
 k.setGravity(0);
 
+type Color = ReturnType<typeof k.rgb>;
 const PLAYER_COLOR = k.rgb(80, 160, 255);
-const TRASH_COLOR = k.rgb(220, 70, 70);
-const BOSS_COLOR = k.rgb(160, 60, 200);
+const DOWN_COLOR = k.rgb(90, 90, 96);
+const GOLD = k.rgb(240, 200, 80);
+const ROLE_COLOR: Record<Role, Color> = {
+  brute: k.rgb(220, 70, 70),
+  swarm: k.rgb(240, 140, 60),
+  mage: k.rgb(60, 190, 190),
+  heavy: k.rgb(170, 40, 40),
+  boss: k.rgb(160, 60, 200),
+};
+const ROLE_SIZE: Record<Role, number> = { brute: 28, swarm: 20, mage: 24, heavy: 40, boss: 56 };
 
 type Vec2 = ReturnType<typeof k.vec2>;
 type Timer = ReturnType<typeof k.wait>;
@@ -224,14 +233,14 @@ function cancelPending() {
   pendingTimers = [];
 }
 
-function floatText(pos: Vec2, msg: string, color: ReturnType<typeof k.rgb>) {
+function floatText(pos: Vec2, msg: string, color: Color) {
   const t = k.add([
     k.text(msg, { size: 16 }),
     k.pos(pos.x, pos.y),
     k.anchor("center"),
     k.color(color),
     k.opacity(1),
-    k.lifespan(0.7, { fade: 0.35 }),
+    k.lifespan(0.8, { fade: 0.35 }),
     k.z(40),
   ]);
   t.onUpdate(() => {
@@ -245,85 +254,85 @@ const GROUND_TILE = 130;
 for (let gy = 0; gy < WORLD_HEIGHT; gy += GROUND_TILE) {
   for (let gx = 0; gx < WORLD_WIDTH; gx += GROUND_TILE) {
     const dark = ((gx / GROUND_TILE + gy / GROUND_TILE) | 0) % 2 === 0;
-    k.add([
-      k.rect(GROUND_TILE, GROUND_TILE),
-      k.pos(gx, gy),
-      k.color(dark ? 26 : 30, dark ? 26 : 30, dark ? 30 : 34),
-      k.z(-100),
-    ]);
+    k.add([k.rect(GROUND_TILE, GROUND_TILE), k.pos(gx, gy), k.color(dark ? 26 : 30, dark ? 26 : 30, dark ? 30 : 34), k.z(-100)]);
   }
 }
 for (const p of [
   { x: 300, y: 300 }, { x: 1100, y: 200 }, { x: 400, y: 1100 },
-  { x: 1600, y: 1050 }, { x: 2000, y: 350 }, { x: 900, y: 800 },
+  { x: 1500, y: 800 }, { x: 2050, y: 330 }, { x: 860, y: 780 },
 ]) {
   k.add([k.circle(34), k.pos(p.x, p.y), k.color(45, 55, 45), k.z(-90)]);
 }
-// Area names on the ground, so "camps cleared" points at somewhere real.
-const AREA_LABEL_POS: Record<string, { x: number; y: number }> = {
-  west: { x: 730, y: 330 }, south: { x: 650, y: 880 }, north: { x: 1305, y: 160 }, lair: { x: 1800, y: 560 },
-};
-const areaLabels = new Map<string, { text: string }>();
+
+// Camp names on the ground, so "camps cleared" points at somewhere real.
+const areaLabels = new Map<string, { text: string; pos: Vec2 }>();
 for (const a of AREAS) {
-  const p = AREA_LABEL_POS[a.id];
-  areaLabels.set(a.id, k.add([k.text(a.name, { size: 14 }), k.pos(p.x, p.y), k.anchor("center"), k.color(110, 110, 120), k.z(-80)]));
+  const members = ENEMY_SPAWNS.filter((s) => s.area === a.id);
+  const x = members.reduce((s, m) => s + m.x, 0) / members.length;
+  const y = Math.min(...members.map((m) => m.y)) - 70;
+  areaLabels.set(a.id, k.add([k.text(a.name, { size: 14 }), k.pos(x, y), k.anchor("center"), k.color(110, 110, 120), k.z(-80)]));
 }
 
 // ---------- enemies ----------
 
-type EnemyState = "idle" | "chasing" | "returning" | "engaged";
 let nextEnemyId = 1;
 
-function spawnEnemy(x: number, y: number, hp: number, maxHp: number, isBoss: boolean, spawnId: string | null) {
-  const labels = isBoss ? BOSS_LABELS : TRASH_LABELS;
+interface SpawnSpec {
+  role: Role;
+  x: number;
+  y: number;
+  hp: number;
+  phase: number;
+  spawnId: string | null;
+  group: string | null;
+}
+
+function spawnEnemy(spec: SpawnSpec) {
+  const def = UNITS[spec.role];
+  const size = ROLE_SIZE[spec.role];
+  const g = spec.group ? GROUP_BY_ID.get(spec.group) : undefined;
+  const lab = def.tier === "boss" ? LABELS.boss : def.tier === "elite" ? LABELS.elite : LABELS.unit;
+  const enemyId = nextEnemyId++; // runtime only; saves use spawnId
   const enemy = k.add([
-    k.pos(x, y),
-    isBoss ? k.rect(56, 56) : k.rect(28, 28),
-    k.color(isBoss ? BOSS_COLOR : TRASH_COLOR),
+    k.pos(spec.x, spec.y),
+    k.rect(size, size),
+    k.color(ROLE_COLOR[spec.role]),
+    // Elites always wear a gold outline. Others get one only while their pack's
+    // hint shows: Kaplay draws an outline of width 0 (or opacity 0) anyway, so
+    // the component is added and removed rather than hidden.
+    ...(def.tier === "elite" ? [k.outline(3, GOLD)] : []),
     k.opacity(1),
     k.area(),
     k.anchor("center"),
     k.z(5),
     "enemy",
     {
-      enemyId: nextEnemyId++, // runtime only; saves use spawnId
-      spawnId,
-      hp,
-      maxHp,
-      block: 0,
-      home: k.vec2(x, y),
-      state: "idle" as EnemyState,
-      isBoss,
-      bodyRadius: isBoss ? BOSS_RADIUS : TRASH_RADIUS, // not "radius": rect() owns that name
-      mass: isBoss ? BOSS_MASS : TRASH_MASS,
-      aggroRange: isBoss ? BOSS_AGGRO_RANGE : TRASH_AGGRO_RANGE,
-      engageRange: isBoss ? BOSS_ENGAGE_RANGE : TRASH_ENGAGE_RANGE,
-      speed: isBoss ? BOSS_SPEED : TRASH_SPEED,
-      patternIndex: 0,
-      intent: null as Intent | null,
+      enemyId,
+      spawnId: spec.spawnId,
+      role: spec.role,
+      tier: def.tier,
+      group: spec.group,
+      groupKind: (g?.kind ?? "skirmish") as "skirmish" | "pack",
+      unit: makeUnit(spec.spawnId ?? `extra-${enemyId}`, spec.role, spec.group, spec.hp, spec.phase) as CombatUnit,
+      home: k.vec2(spec.x, spec.y),
+      state: "idle" as AIState,
+      bodyRadius: def.radius, // not "radius": rect() owns that name
+      mass: def.tier === "normal" ? 1 : def.tier === "elite" ? 1.6 : 2.2,
+      aggroRange: def.aggroRange,
+      engageRange: def.engageRange,
+      speed: def.speed,
       acted: false,
       engagePos: null as Vec2 | null,
       formFrom: null as Vec2 | null,
       formTo: null as Vec2 | null,
       overflow: false,
+      labels: lab,
     },
   ]);
-  enemy.add([
-    k.text(String(hp), { size: isBoss ? 16 : 13 }),
-    k.pos(0, labels.hp),
-    k.anchor("center"),
-    k.color(255, 255, 255),
-    k.opacity(1),
-    "enemyHpLabel",
-  ]);
-  enemy.add([
-    k.text("", { size: 14, align: "center" }),
-    k.pos(0, labels.intent),
-    k.anchor("center"),
-    k.color(255, 210, 80),
-    k.opacity(1),
-    "enemyStateLabel",
-  ]);
+  enemy.add([k.text(String(spec.hp), { size: def.tier === "boss" ? 16 : 13 }), k.pos(0, lab.hp), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyHpLabel"]);
+  enemy.add([k.text("", { size: 14, align: "center" }), k.pos(0, lab.intent), k.anchor("center"), k.color(255, 210, 80), k.opacity(1), "enemyStateLabel"]);
+  if (def.tier === "elite") enemy.add([k.text("ELITE", { size: 12 }), k.pos(0, lab.tag), k.anchor("center"), k.color(GOLD), k.opacity(1), "enemyTagLabel"]);
+  if (spec.role === "mage") enemy.add([k.text("+", { size: 18 }), k.pos(0, 1), k.anchor("center"), k.color(10, 40, 40), k.opacity(1), "enemyGlyph"]);
   enemy.onClick(() => selectTarget(enemy));
   return enemy;
 }
@@ -331,43 +340,121 @@ type Enemy = ReturnType<typeof spawnEnemy>;
 
 let enemies: Enemy[] = [];
 
-function hpLabelOf(e: Enemy) {
-  return e.get("enemyHpLabel")[0];
-}
-function stateLabelOf(e: Enemy) {
-  return e.get("enemyStateLabel")[0];
-}
+const labelOf = (e: Enemy, tag: string) => e.get(tag)[0] as unknown as { text: string; color: Color; opacity: number } | undefined;
+const hpLabelOf = (e: Enemy) => labelOf(e, "enemyHpLabel");
+const stateLabelOf = (e: Enemy) => labelOf(e, "enemyStateLabel");
+
 function enemyName(e: Enemy) {
-  return e.isBoss ? "Boss" : `Grunt ${e.spawnId ?? e.enemyId}`;
+  const base = UNITS[e.role].name;
+  return e.spawnId ? `${base} (${e.spawnId})` : base;
 }
+
 // Never put square brackets in Kaplay text: [x] is a style tag and an
 // unmatched one throws, halting the game loop.
 function refreshHpLabel(e: Enemy) {
   const label = hpLabelOf(e);
-  if (label) label.text = e.block > 0 ? `${e.hp} (blk ${e.block})` : String(e.hp);
+  if (!label) return;
+  const u = e.unit;
+  label.text = u.downed ? "down" : u.block > 0 ? `${u.hp} (blk ${u.block})` : String(u.hp);
 }
+
+/** What a standing unit will do, with the real numbers; for a body, whether a mage is about to raise it. */
 function intentText(e: Enemy): string {
-  const intent = e.intent;
-  if (!intent) return "";
-  if (intent.kind === "attack") {
-    return e.isBoss && intent.value >= BOSS_BIGATTACK_DMG ? `HEAVY ATK ${intent.value}` : `ATK ${intent.value}`;
+  const u = e.unit;
+  if (u.downed) {
+    const raiser = activeEncounter?.fight.units.find((m) => !m.downed && m.intent?.kind === "revive" && m.intent.target === u.key);
+    return raiser && raiser.intent?.kind === "revive" ? `↺ +${raiser.intent.value} HP` : "";
   }
-  if (intent.kind === "defend") return `DEF +${intent.value}`;
-  const next = BOSS_PATTERN[e.patternIndex % BOSS_PATTERN.length];
-  return next.kind === "attack" ? `CHARGE\nnext: ATK ${next.value}` : "CHARGE";
+  const it = u.intent;
+  if (!it) return "";
+  if (it.kind === "attack") {
+    if (it.ranged) return `SHOOT ${it.value}`;
+    return it.value >= 10 ? `HEAVY ATK ${it.value}` : `ATK ${it.value}`;
+  }
+  if (it.kind === "defend") return `DEF +${it.value}`;
+  if (it.kind === "charge") return `CHARGE\nnext: ATK ${it.next}`;
+  return `REVIVE +${it.value}`;
 }
+
+function intentLong(e: Enemy): string {
+  const it = e.unit.intent;
+  if (it?.kind === "revive") {
+    const t = enemies.find((x) => x.unit.key === it.target);
+    return `will revive ${t ? enemyName(t) : it.target} at ${it.value} HP`;
+  }
+  return intentText(e).replace("\n", " ");
+}
+
+/** Exploration label: alert state plus what's special about this unit. */
+function scoutText(e: Enemy): string {
+  const tag = e.role === "mage" ? "MAGE" : "";
+  const st = e.state === "chasing" ? "!" : e.state === "returning" ? "…" : "";
+  return [st, tag].filter(Boolean).join(" ");
+}
+
 function refreshIntentLabel(e: Enemy) {
   const label = stateLabelOf(e);
   if (!label) return;
-  label.text = intentText(e);
-  label.color = e.acted ? k.rgb(120, 120, 120) : k.rgb(255, 210, 80);
+  label.text = activeEncounter && activeEncounter.roster.includes(e) ? intentText(e) : scoutText(e);
+  label.color = e.unit.downed ? k.rgb(150, 230, 150) : e.acted ? k.rgb(120, 120, 120) : k.rgb(255, 210, 80);
 }
 
-function flash(obj: { color: ReturnType<typeof k.rgb>; exists: () => boolean }, revert: ReturnType<typeof k.rgb>, c = k.rgb(255, 255, 255)) {
-  obj.color = c;
+function showDowned(e: Enemy, down: boolean) {
+  e.color = down ? DOWN_COLOR : ROLE_COLOR[e.role];
+  refreshHpLabel(e);
+  refreshIntentLabel(e);
+}
+
+function flash(e: Enemy) {
+  e.color = k.rgb(255, 255, 255);
   k.wait(HIT_FLASH_DURATION, () => {
-    if (obj.exists()) obj.color = revert;
+    if (e.exists()) e.color = e.unit.downed ? DOWN_COLOR : ROLE_COLOR[e.role];
   });
+}
+function flashPlayer() {
+  player.color = k.rgb(255, 90, 90);
+  k.wait(HIT_FLASH_DURATION, () => {
+    player.color = PLAYER_COLOR;
+  });
+}
+
+// ---------- pack hints (before contact) ----------
+
+const packHints = new Map<string, { text: string; pos: Vec2; opacity: number }>();
+for (const g of GROUPS.filter((gr) => gr.kind === "pack")) {
+  const a = groupAnchor(g.id);
+  const top = Math.min(...ENEMY_SPAWNS.filter((s) => s.group === g.id).map((s) => s.y));
+  packHints.set(g.id, k.add([k.text("", { size: 13, align: "center" }), k.pos(a.x, top - 92), k.anchor("center"), k.color(200, 200, 215), k.opacity(0), k.z(-70)]));
+}
+
+function packMakeup(groupId: string): string {
+  const live = enemies.filter((e) => e.exists() && e.group === groupId);
+  const notes: string[] = [];
+  if (live.some((e) => e.tier === "boss")) notes.push("BOSS");
+  if (live.some((e) => e.tier === "elite")) notes.push("ELITE");
+  if (live.some((e) => e.role === "mage")) notes.push("mage");
+  return `${GROUP_BY_ID.get(groupId)!.label} · ${live.length} together${notes.length ? ` · ${notes.join(", ")}` : ""}`;
+}
+
+/** While exploring near a pack: its name and makeup on the ground, and a shared outline on its members. */
+function updatePackHints() {
+  for (const [gid, label] of packHints) {
+    const live = enemies.filter((e) => e.exists() && e.group === gid && e.state !== "engaged");
+    const a = groupAnchor(gid);
+    const near = playing() && !activeEncounter && live.length > 0 && Math.hypot(player.pos.x - a.x, player.pos.y - a.y) < PACK_HINT_RANGE;
+    label.opacity = near ? 1 : 0;
+    if (near) {
+      const t = packMakeup(gid);
+      if (label.text !== t) label.text = t;
+    }
+    for (const e of enemies) {
+      if (!e.exists() || e.group !== gid || e.tier === "elite") continue; // elites keep their gold outline
+      const want = near && e.state !== "engaged";
+      const has = e.has("outline");
+      if (want && !has) e.use(k.outline(2, k.rgb(235, 235, 235)));
+      else if (!want && has) e.unuse("outline");
+    }
+  }
 }
 
 // ---------- encounter state ----------
@@ -375,12 +462,12 @@ function flash(obj: { color: ReturnType<typeof k.rgb>; exists: () => boolean }, 
 interface Encounter {
   id: number;
   roster: Enemy[];
+  fight: Fight;
   difficulty: "normal" | "dangerous";
   camPos: Vec2;
   camScale: number;
   phase: Phase;
   fleeing: boolean;
-  turnNumber: number;
   phaseStartedAt: number;
   anchor: { x: number; y: number };
 }
@@ -415,11 +502,12 @@ function blockedReason(): string {
   }
 }
 
-function aliveRoster(): Enemy[] {
-  return activeEncounter ? activeEncounter.roster.filter((e) => e.exists()) : [];
+/** Fight members still on their feet. */
+function standingRoster(): Enemy[] {
+  return activeEncounter ? activeEncounter.roster.filter((e) => e.exists() && !e.unit.downed) : [];
 }
 function overflowList(): Enemy[] {
-  return aliveRoster().filter((e) => e.overflow);
+  return activeEncounter ? activeEncounter.roster.filter((e) => e.exists() && e.overflow) : [];
 }
 
 function selectTarget(e: Enemy) {
@@ -428,32 +516,20 @@ function selectTarget(e: Enemy) {
     showFeedback("that enemy isn't in this fight");
     return;
   }
+  if (e.unit.downed) {
+    showFeedback(`${enemyName(e)} is down`);
+    return;
+  }
   selectedTarget = e;
 }
 
 function cycleTarget(dir: number) {
-  const alive = aliveRoster();
-  if (!alive.length) return;
+  const st = standingRoster();
+  if (!st.length) return;
   // left-to-right on screen for on-stage enemies, then the side list
-  const order = [...alive.filter((e) => !e.overflow).sort((a, b) => a.pos.x - b.pos.x), ...alive.filter((e) => e.overflow)];
+  const order = [...st.filter((e) => !e.overflow).sort((a, b) => a.pos.x - b.pos.x), ...st.filter((e) => e.overflow)];
   const i = selectedTarget ? order.indexOf(selectedTarget) : -1;
   selectedTarget = order[(i + dir + order.length) % order.length];
-}
-
-function computeDifficulty(roster: Enemy[]): "normal" | "dangerous" {
-  const weight = roster.length + roster.filter((e) => e.isBoss).length * BOSS_DANGER_BONUS;
-  return weight >= DANGER_THRESHOLD ? "dangerous" : "normal";
-}
-
-function rollIntent(e: Enemy) {
-  if (e.isBoss) {
-    e.intent = BOSS_PATTERN[e.patternIndex % BOSS_PATTERN.length];
-    e.patternIndex++;
-  } else {
-    e.intent = { kind: "attack", value: TRASH_ATK_DAMAGE };
-  }
-  e.acted = false;
-  refreshIntentLabel(e);
 }
 
 // ---------- checkpoints ----------
@@ -464,12 +540,14 @@ function aliveMapEnemy(spawnId: string) {
 
 /**
  * The logical world state at a stable moment: player HP and position, every
- * map enemy's HP by stable id (0 = killed). Enemy positions are not saved; on
- * restore they stand at their home spot, so formation slots never leak into a save.
+ * map enemy's HP by stable id (0 = confirmed dead), and where each elite /
+ * boss is in its action cycle. Enemy positions are not saved; on restore they
+ * stand at their home spot, so formation slots never leak into a save.
  */
 function checkpoint(reason: CheckpointReason): SaveData | null {
   if (!run) return null;
-  const enemiesHp = Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.hp ?? 0)]));
+  const enemiesHp = Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.unit.hp ?? 0)]));
+  const phases = Object.fromEntries(PHASED_IDS.map((id) => [id, aliveMapEnemy(id)?.unit.phase ?? run!.phases[id] ?? 0]));
   const allDead = ENEMY_SPAWNS.every((s) => enemiesHp[s.id] === 0);
   const dead = runState === "dead";
   lastSavedAt = Math.max(Date.now(), lastSavedAt + 1);
@@ -484,6 +562,7 @@ function checkpoint(reason: CheckpointReason): SaveData | null {
       y: k.clamp(Math.round(player.pos.y), PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE),
     },
     enemies: enemiesHp,
+    phases,
     stats: { ...run.stats },
   };
   return run;
@@ -494,13 +573,52 @@ function saveCheckpoint(reason: CheckpointReason) {
   if (cp) saveClient.save(cp);
 }
 
+// ---------- exploration AI (frozen while any fight is active) ----------
+
+const PACKS = new Map<string, PackInfo>(
+  GROUPS.filter((g) => g.kind === "pack").map((g) => [g.id, { anchor: groupAnchor(g.id), leash: g.leash }]),
+);
+let packsOverride: Map<string, PackInfo> | null = null; // dev test fights disable leashes
+
+function explorers(): Explorer<Enemy>[] {
+  return enemies
+    .filter((e) => e.exists())
+    .map((e) => ({
+      ref: e, key: String(e.enemyId), alive: true, state: e.state, x: e.pos.x, y: e.pos.y,
+      group: e.group, groupKind: e.groupKind, aggroRange: e.aggroRange, engageRange: e.engageRange,
+    }));
+}
+
+function updateExploration() {
+  const list = explorers();
+  for (const [key, state] of nextAIStates(list, player.pos, packsOverride ?? PACKS)) {
+    const e = list.find((x) => x.key === key)!.ref;
+    e.state = state;
+  }
+  for (const e of enemies) {
+    if (!e.exists() || e.state === "engaged") continue;
+    const toPlayer = player.pos.sub(e.pos);
+    const dist = toPlayer.len();
+    if (e.state === "chasing") {
+      // a mage hangs back behind a pack-mate that's still chasing; alone, it closes in like anyone else
+      const escorted = e.role === "mage" && enemies.some((o) => o !== e && o.exists() && o.group === e.group && o.state === "chasing" && o.role !== "mage");
+      const stopAt = escorted ? MAGE_FOLLOW_DISTANCE : e.engageRange;
+      if (dist > stopAt) e.pos = e.pos.add(toPlayer.unit().scale(e.speed * k.dt()));
+    } else if (e.state === "returning") {
+      const toHome = e.home.sub(e.pos);
+      if (toHome.len() < 4) {
+        e.pos = e.home.clone();
+        e.state = "idle";
+      } else e.pos = e.pos.add(toHome.unit().scale(e.speed * k.dt()));
+    }
+    refreshIntentLabel(e);
+  }
+}
+
 // ---------- encounter flow ----------
 
 function tryTriggerEncounter(now: number) {
-  const roster = selectRoster(
-    enemies.map((e) => ({ ref: e, alive: e.exists(), state: e.state, x: e.pos.x, y: e.pos.y, engageRange: e.engageRange })),
-    player.pos,
-  );
+  const roster = selectRoster(explorers(), player.pos);
   if (!roster) return;
 
   // The pre-fight checkpoint: closing the tab mid-fight comes back to here.
@@ -508,13 +626,30 @@ function tryTriggerEncounter(now: number) {
   saveCheckpoint("engage");
 
   moveTarget = null;
-  document.body.classList.add("fighting");
   const anchor = { x: player.pos.x, y: player.pos.y };
-  const units = roster.map((e) => ({ id: e.enemyId, isBoss: e.isBoss, pos: { x: e.pos.x, y: e.pos.y } }));
+  player.block = 0;
+  const fight = beginFight(roster.map((e) => e.unit), player);
+  activeEncounter = {
+    id: nextEncounterId++,
+    roster,
+    fight,
+    difficulty: fightThreat(roster.map((e) => e.role)) >= DANGER_THRESHOLD ? "dangerous" : "normal",
+    camPos: k.vec2(player.pos.x, player.pos.y),
+    camScale: baseScale(),
+    phase: "forming",
+    fleeing: false,
+    phaseStartedAt: now,
+    anchor,
+  };
+  // Show the fight HUD and dock first, so the space measured below is the space the fight really has.
+  document.body.classList.add("fighting");
+  renderHud();
+  const units = roster.map((e) => ({ id: e.enemyId, isBoss: e.tier === "boss", elite: e.tier === "elite", pos: { x: e.pos.x, y: e.pos.y } }));
   // Slots are assigned once, from the real space left between HUD and hand.
   // If some don't fit, the side list appears and the stage is re-measured.
   ui.overflow.hidden = true;
   let formation = layoutFormation(units, anchor, viewport());
+  if (DEV) (window as unknown as { __formationVp: unknown }).__formationVp = { vp: viewport(), stage: formation.stage };
   if (formation.overflow.length) {
     ui.overflow.hidden = false;
     placeOverflowPanel();
@@ -528,28 +663,27 @@ function tryTriggerEncounter(now: number) {
     e.formFrom = e.pos.clone();
     e.formTo = slot ? k.vec2(slot.x, slot.y) : e.pos.clone();
     e.overflow = overflowIds.has(e.enemyId);
-    e.intent = null;
-    e.block = 0;
+    e.acted = false;
+  }
+
+  for (const e of roster) {
     refreshIntentLabel(e);
     refreshHpLabel(e);
   }
-
-  activeEncounter = {
-    id: nextEncounterId++,
-    roster,
-    difficulty: computeDifficulty(roster),
-    camPos: k.vec2(player.pos.x, player.pos.y),
-    camScale: baseScale(),
-    phase: "forming",
-    fleeing: false,
-    turnNumber: 1,
-    phaseStartedAt: now,
-    anchor,
-  };
   replanCamera(activeEncounter, true);
-  player.block = 0;
-  selectedTarget = roster.find((e) => e.isBoss && !e.overflow) ?? roster.find((e) => !e.overflow) ?? roster[0];
+  selectedTarget =
+    roster.find((e) => e.tier === "boss" && !e.overflow) ?? roster.find((e) => e.tier === "elite" && !e.overflow) ?? roster.find((e) => !e.overflow) ?? roster[0];
   renderHand();
+}
+
+function enemyBounds(units: { id: number; isBoss: boolean; elite?: boolean }[], slots: Map<number, { x: number; y: number }>): Rect {
+  const rects = units.map((u) => boxAt(slots.get(u.id)!, boxFor(u)));
+  return {
+    x0: Math.min(...rects.map((r) => r.x0)),
+    y0: Math.min(...rects.map((r) => r.y0)),
+    x1: Math.max(...rects.map((r) => r.x1)),
+    y1: Math.max(...rects.map((r) => r.y1)),
+  };
 }
 
 /** Frames the fight inside the current safe area; re-run on resize. Uses final slots, not pre-fight positions. */
@@ -558,7 +692,7 @@ function replanCamera(enc: Encounter, useSlots: boolean) {
   const shown = enc.roster.filter((e) => e.exists() && !e.overflow);
   const units = shown.map((e) => {
     const p = useSlots && e.formTo ? e.formTo : e.pos;
-    return { id: e.enemyId, isBoss: e.isBoss, pos: { x: p.x, y: p.y } };
+    return { id: e.enemyId, isBoss: e.tier === "boss", elite: e.tier === "elite", pos: { x: p.x, y: p.y } };
   });
   const slots = new Map(units.map((u) => [u.id, u.pos]));
   const bounds = formationBounds(units, slots, enc.anchor);
@@ -568,16 +702,6 @@ function replanCamera(enc: Encounter, useSlots: boolean) {
   const cam = planCamera(bounds, viewport(), { min: base * 0.5, max }, core);
   enc.camPos = k.vec2(cam.center.x, cam.center.y);
   enc.camScale = cam.scale;
-}
-
-function enemyBounds(units: { id: number; isBoss: boolean }[], slots: Map<number, { x: number; y: number }>): Rect {
-  const rects = units.map((u) => boxAt(slots.get(u.id)!, u.isBoss ? BOSS_BOX : TRASH_BOX));
-  return {
-    x0: Math.min(...rects.map((r) => r.x0)),
-    y0: Math.min(...rects.map((r) => r.y0)),
-    x1: Math.max(...rects.map((r) => r.x1)),
-    y1: Math.max(...rects.map((r) => r.y1)),
-  };
 }
 
 function finishForming(enc: Encounter) {
@@ -590,11 +714,14 @@ function finishForming(enc: Encounter) {
 function startPlayerTurn(enc: Encounter) {
   player.energy = PLAYER_MAX_ENERGY;
   drawHand(piles, HAND_SIZE);
+  rollTurn(enc.fight);
   for (const e of enc.roster) {
-    if (!e.exists()) continue;
+    e.acted = false;
     refreshHpLabel(e);
-    rollIntent(e);
   }
+  for (const e of enc.roster) refreshIntentLabel(e); // after all intents exist, so bodies show who raises them
+  const raising = enc.roster.filter((e) => e.unit.intent?.kind === "revive");
+  if (raising.length) showFeedback(raising.map((e) => `${enemyName(e)} ${intentLong(e)}`).join("; "));
   renderHand();
 }
 
@@ -608,66 +735,84 @@ function endPlayerTurn(fleeing: boolean) {
   enc.fleeing = fleeing;
   discardHand(piles);
   renderHand();
-  // An enemy's DEF block covered the player turn that just ended; it expires now.
-  for (const e of enc.roster) {
-    if (!e.exists()) continue;
-    e.block = 0;
-    refreshHpLabel(e);
-  }
-  const plan = planResolve(
-    { hp: player.hp, block: player.block },
-    enc.roster.map((e) => ({ id: e.enemyId, alive: e.exists(), intent: e.intent })),
-  );
+  beginEnemyTurn(enc.fight); // an enemy's DEF block covered the player turn that just ended
+  for (const e of enc.roster) refreshHpLabel(e);
+  const plan = planEnemyTurn(enc.fight);
   showFeedback(fleeing ? "Fleeing - enemies act first..." : "Enemy turn");
-  playResolve(enc, plan, 0);
+  playResolve(enc, plan.events, plan.died, 0);
 }
 
-function playResolve(enc: Encounter, plan: ResolvePlan, i: number) {
+const byKey = (enc: Encounter, key: string) => enc.roster.find((r) => r.unit.key === key);
+
+function showEnemyEvent(enc: Encounter, ev: EnemyEvent) {
+  const e = byKey(enc, ev.from);
+  if (!e || !e.exists()) return;
+  e.acted = true;
+  if (ev.kind === "attack") {
+    flash(e);
+    flashPlayer();
+    floatText(player.pos.add(0, -28), ev.damageTaken > 0 ? `-${ev.damageTaken}` : "blocked", k.rgb(255, 110, 110));
+    k.shake(ev.value >= 10 ? 7 : 2);
+    showFeedback(`${enemyName(e)} ${ev.ranged ? "shoots" : "hits"} for ${ev.value}${ev.absorbed > 0 ? ` (${ev.absorbed} blocked)` : ""}`);
+  } else if (ev.kind === "defend") {
+    floatText(e.pos.add(0, -20), `+${ev.value} blk`, k.rgb(140, 200, 255));
+    showFeedback(`${enemyName(e)} braces: +${ev.value} block`);
+  } else if (ev.kind === "charge") {
+    floatText(e.pos.add(0, -20), "charging!", k.rgb(255, 180, 60));
+    showFeedback(`${enemyName(e)} charges up - ${ev.next} damage next turn`);
+  } else if (ev.kind === "revive") {
+    const t = byKey(enc, ev.target);
+    if (t) {
+      showDowned(t, false);
+      floatText(t.pos.add(0, -20), `revived +${ev.value}`, k.rgb(150, 230, 150));
+    }
+    showFeedback(`${enemyName(e)} revives ${t ? enemyName(t) : ev.target} at ${ev.value} HP`);
+  } else {
+    floatText(e.pos.add(0, -20), "fizzled", k.rgb(170, 170, 170));
+    showFeedback(`${enemyName(e)}'s revive fizzles`);
+  }
+  for (const r of enc.roster) {
+    refreshHpLabel(r);
+    refreshIntentLabel(r);
+  }
+}
+
+function playResolve(enc: Encounter, events: EnemyEvent[], died: boolean, i: number) {
   if (activeEncounter !== enc || runState !== "playing") return;
-  if (i >= plan.events.length) {
+  if (i >= events.length) {
     finishResolve(enc);
     return;
   }
-  const ev = plan.events[i];
-  const e = enc.roster.find((r) => r.enemyId === ev.id);
-  player.hp = ev.hpAfter;
-  player.block = ev.blockAfter;
-  if (e && e.exists()) {
-    e.acted = true;
-    if (ev.intent.kind === "defend") {
-      e.block += ev.intent.value;
-      refreshHpLabel(e);
-      floatText(e.pos.add(0, -20), `+${ev.intent.value} blk`, k.rgb(140, 200, 255));
-      showFeedback(`${enemyName(e)} braces: +${ev.intent.value} block`);
-    } else if (ev.intent.kind === "charge") {
-      floatText(e.pos.add(0, -20), "charging!", k.rgb(255, 180, 60));
-      showFeedback(`${enemyName(e)} charges up - heavy hit next turn`);
-    } else {
-      flash(e, e.isBoss ? BOSS_COLOR : TRASH_COLOR);
-      flash(player, PLAYER_COLOR, k.rgb(255, 90, 90));
-      const absorbed = ev.intent.value - ev.damageTaken;
-      floatText(player.pos.add(0, -28), ev.damageTaken > 0 ? `-${ev.damageTaken}` : "blocked", k.rgb(255, 110, 110));
-      k.shake(ev.intent.value >= BOSS_BIGATTACK_DMG ? 7 : 2);
-      showFeedback(`${enemyName(e)} hits for ${ev.intent.value}` + (absorbed > 0 ? ` (${absorbed} blocked)` : ""));
-    }
-    refreshIntentLabel(e);
-  }
-  if (plan.died && i === plan.events.length - 1) {
+  applyEnemyEvent(enc.fight, events[i]);
+  showEnemyEvent(enc, events[i]);
+  if (died && i === events.length - 1) {
     finishDeath();
     return;
   }
-  schedule(ENEMY_ACTION_GAP, () => playResolve(enc, plan, i + 1));
+  schedule(ENEMY_ACTION_GAP, () => playResolve(enc, events, died, i + 1));
+}
+
+/** Whoever is still down when a fight ends is confirmed dead: removed, and counted once by stable id. */
+function confirmDeaths(enc: Encounter) {
+  const { dead } = endFight(enc.fight);
+  for (const key of dead) {
+    const e = byKey(enc, key);
+    if (!e || !e.exists()) continue;
+    if (run && e.spawnId) run.stats.kills++;
+    k.destroy(e);
+  }
 }
 
 function finishResolve(enc: Encounter) {
   if (enc.fleeing) {
     if (!setPhase(enc, "fleeEscaped")) return;
+    confirmDeaths(enc);
     for (const e of enc.roster) {
       if (!e.exists()) continue;
       e.formFrom = e.pos.clone();
       e.formTo = e.engagePos ? e.engagePos.clone() : e.pos.clone();
-      e.block = 0;
-      e.intent = null;
+      e.unit.block = 0;
+      e.unit.intent = null; // the next intent is generated fresh, from the saved phase
       refreshIntentLabel(e);
       refreshHpLabel(e);
     }
@@ -676,7 +821,6 @@ function finishResolve(enc: Encounter) {
   }
   player.block = 0;
   if (!setPhase(enc, "nextTurn")) return;
-  enc.turnNumber++;
   startPlayerTurn(enc);
 }
 
@@ -693,10 +837,13 @@ function finishUnforming(enc: Encounter) {
 }
 
 function finishVictory() {
+  const enc = activeEncounter;
+  if (!enc) return;
+  confirmDeaths(enc);
   encounterCooldownUntil = k.time() + END_GRACE;
   cleanupEncounter();
   if (run) run.stats.wins++;
-  const cleared = !enemies.some((e) => e.exists());
+  const cleared = !enemies.some((e) => e.exists() && e.spawnId);
   if (cleared) runState = "won";
   saveCheckpoint("victory");
   if (cleared) showEndScreen();
@@ -704,7 +851,9 @@ function finishVictory() {
 }
 
 function finishDeath() {
+  const enc = activeEncounter;
   cancelPending();
+  if (enc) confirmDeaths(enc);
   endEncounterPiles(piles);
   runState = "dead";
   activeEncounter = null;
@@ -727,54 +876,33 @@ function cleanupEncounter() {
     if (!e.exists()) continue;
     e.overflow = false;
     e.engagePos = e.formFrom = e.formTo = null;
+    e.unit.intent = null;
+    e.unit.block = 0;
+    refreshIntentLabel(e);
+    refreshHpLabel(e);
   }
   renderHand();
 }
 
-// ---------- exploration AI (frozen while any fight is active) ----------
-
-function updateEnemyAI(e: Enemy) {
-  const toPlayer = player.pos.sub(e.pos);
-  const dist = toPlayer.len();
-  if (e.state === "idle") {
-    if (dist <= e.aggroRange) e.state = "chasing";
-  } else if (e.state === "chasing") {
-    if (dist > e.aggroRange * LEASH_FACTOR) e.state = "returning";
-    else if (dist > e.engageRange) e.pos = e.pos.add(toPlayer.unit().scale(e.speed * k.dt()));
-  } else if (e.state === "returning") {
-    const toHome = e.home.sub(e.pos);
-    if (toHome.len() < 4) {
-      e.pos = e.home.clone();
-      e.state = "idle";
-    } else {
-      e.pos = e.pos.add(toHome.unit().scale(e.speed * k.dt()));
-    }
-    if (dist <= e.aggroRange) e.state = "chasing";
-  }
-  const label = stateLabelOf(e);
-  if (label) label.text = e.state === "chasing" ? "!" : e.state === "returning" ? "…" : "";
-}
-
 // ---------- cards ----------
 
-function damageEnemy(enemy: Enemy, amount: number) {
-  const absorbed = Math.min(enemy.block, amount);
-  enemy.block -= absorbed;
-  const dealt = amount - absorbed;
-  enemy.hp -= dealt;
-  flash(enemy, enemy.isBoss ? BOSS_COLOR : TRASH_COLOR);
-  floatText(enemy.pos.add(0, -10), dealt > 0 ? `-${dealt}` : "blocked", k.rgb(255, 240, 160));
-  if (enemy.hp <= 0) {
-    enemy.hp = 0;
-    k.destroy(enemy);
-    if (run && enemy.spawnId) run.stats.kills++;
-    return;
+function damageEnemy(enc: Encounter, e: Enemy, amount: number) {
+  const r = hitUnit(enc.fight, e.unit.key, amount);
+  flash(e);
+  floatText(e.pos.add(0, -10), r.dealt > 0 ? `-${r.dealt}` : "blocked", k.rgb(255, 240, 160));
+  if (r.downed) {
+    showDowned(e, true);
+    showFeedback(e.group && enc.roster.some((m) => m.role === "mage" && !m.unit.downed && m.group === e.group && m.unit.reviveUsed === false)
+      ? `${enemyName(e)} is down - a mage could raise it next turn`
+      : `${enemyName(e)} is down`);
   }
-  refreshHpLabel(enemy);
+  refreshHpLabel(e);
+  for (const r2 of enc.roster) refreshIntentLabel(r2); // a body's "↺" or a downed mage's cancelled revive
 }
 
 function playCardAt(idx: number) {
-  if (!canAct()) {
+  const enc = activeEncounter;
+  if (!enc || !canAct()) {
     showFeedback(blockedReason());
     return;
   }
@@ -787,27 +915,26 @@ function playCardAt(idx: number) {
     showFeedback(`${card.name} needs ${card.cost} energy (you have ${player.energy})`);
     return;
   }
-  const alive = aliveRoster();
-  const target =
-    selectedTarget && selectedTarget.exists() && alive.includes(selectedTarget) ? selectedTarget : alive[0];
+  const st = standingRoster();
+  const target = selectedTarget && selectedTarget.exists() && st.includes(selectedTarget) ? selectedTarget : st[0];
 
   // Fully settle this card (out of hand, cost paid, effect applied, card sent
   // to discard/exhaust) before checking for victory, so a lethal play can't
   // cut cleanup in half and strand the rest of the hand.
   takeFromHand(piles, idx);
   player.energy -= card.cost;
-  applyCard(card, target, alive);
+  applyCard(enc, card, target, st);
   settlePlayed(piles, card);
   renderHand();
 
-  if (aliveRoster().length === 0) finishVictory();
+  if (isWon(enc.fight)) finishVictory();
 }
 
-function applyCard(card: CardDef, target: Enemy | undefined, alive: Enemy[]) {
+function applyCard(enc: Encounter, card: CardDef, target: Enemy | undefined, st: Enemy[]) {
   if (card.kind === "single") {
-    if (target) damageEnemy(target, card.value);
+    if (target) damageEnemy(enc, target, card.value);
   } else if (card.kind === "aoe") {
-    for (const e of alive) damageEnemy(e, card.value);
+    for (const e of st) damageEnemy(enc, e, card.value);
   } else if (card.kind === "guard") {
     player.block += card.value;
     floatText(player.pos.add(0, -28), `+${card.value} blk`, k.rgb(140, 200, 255));
@@ -862,16 +989,20 @@ function renderOverflow() {
   const show = list.length > 0 && !!activeEncounter && activeEncounter.phase !== "unforming";
   if (ui.overflow.hidden === show) ui.overflow.hidden = !show;
   if (!show) return;
-  const sig = JSON.stringify(list.map((e) => [e.enemyId, e.hp, e.block, intentText(e), e === selectedTarget]));
+  const sig = JSON.stringify(list.map((e) => [e.enemyId, e.unit.hp, e.unit.block, e.unit.downed, intentText(e), e === selectedTarget]));
   if (sig === overflowSignature) return;
   overflowSignature = sig;
-  setText(ui.overflowTitle, `+${list.length} more in this fight (not on screen)`);
+  const up = list.filter((e) => !e.unit.downed).length;
+  setText(ui.overflowTitle, `+${list.length} more in this fight (not on screen, ${up} standing)`);
   ui.overflowList.replaceChildren(
     ...list.map((e) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.textContent = `${enemyName(e)} · ${e.hp} HP${e.block ? ` (blk ${e.block})` : ""} · ${intentText(e).replace("\n", " ")}`;
+      const u = e.unit;
+      const note = u.downed ? intentText(e) || "down" : intentLong(e);
+      b.textContent = `${enemyName(e)} · ${u.downed ? "down" : `${u.hp} HP${u.block ? ` (blk ${u.block})` : ""}`} · ${note}`;
       b.setAttribute("aria-pressed", String(e === selectedTarget));
+      if (u.downed) b.disabled = true;
       b.addEventListener("click", () => selectTarget(e));
       return b;
     }),
@@ -881,7 +1012,7 @@ function renderOverflow() {
 /** Live view of what the next checkpoint would hold (for HUD counts), without saving. */
 function checkpointPreview(): SaveData {
   const base = run ?? newRun("run_preview00", 1, 0);
-  return { ...base, enemies: Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.hp ?? 0)])) };
+  return { ...base, enemies: Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.unit.hp ?? 0)])) };
 }
 
 function renderHud() {
@@ -891,7 +1022,7 @@ function renderHud() {
   setText(
     ui.state,
     cur
-      ? `${cur.difficulty === "dangerous" ? "DANGEROUS fight" : "Fight"}: ${aliveRoster().length} foe(s) alive`
+      ? `${cur.difficulty === "dangerous" ? "DANGEROUS fight" : "Fight"}: ${standingRoster().length} standing of ${cur.roster.length}`
       : runState === "playing"
         ? "Exploring"
         : runState === "dead"
@@ -907,10 +1038,10 @@ function renderHud() {
       resolving: cur.fleeing ? "fleeing: enemies act first" : "ENEMY TURN",
       unforming: "escaped, enemies falling back",
     };
-    const inc = aliveRoster().reduce((s, e) => s + (e.intent?.kind === "attack" ? e.intent.value : 0), 0);
+    const inc = incomingDamage(cur.fight);
     setText(
       ui.turn,
-      `Turn ${cur.turnNumber} · ${phaseLabel[cur.phase]}` +
+      `Turn ${cur.fight.turn} · ${phaseLabel[cur.phase]}` +
         (cur.phase === "playerTurn" ? ` · incoming ${inc} (${Math.max(0, inc - player.block)} after block)` : ""),
     );
     setText(ui.piles, `draw ${piles.draw.length} · discard ${piles.discard.length} · exhausted ${piles.exhaust.length}`);
@@ -928,7 +1059,7 @@ function renderHud() {
   setText(
     ui.hint,
     runState === "playing" && !cur
-      ? "Move: WASD / arrow keys, or tap and hold on the map. When an enemy reaches you, nearby enemies that are chasing you join the fight."
+      ? "Move: WASD / arrow keys, or tap and hold on the map. Outlined enemies are a pack: pull one and the whole pack comes."
       : "",
   );
 }
@@ -989,10 +1120,13 @@ function hideScreen() {
 const HOW_TO = `
 <h2>How to play</h2>
 <ul>
-  <li><b>Goal:</b> clear the four enemy camps. Walk near enemies to draw them out. When one reaches you, the enemies close by that are chasing you join that fight; ones further back keep chasing after it ends, so you choose how many you take on.</li>
+  <li><b>Goal:</b> clear the six camps; the Warlord waits in the last one. Walk near enemies to draw them out.</li>
+  <li><b>Who joins a fight:</b> lone enemies notice and give up on their own, so you can pull them one at a time. <b>Packs</b> (outlined, with their name on the ground) move together: pull one and the whole pack chases you, gives up together if you run far enough, and joins the fight together. Nearby enemies already chasing you join too.</li>
   <li><b>Move:</b> WASD or arrow keys, or tap and hold on the map.</li>
-  <li><b>Fight:</b> each turn you get 3 energy and 4 cards. Tap an enemy (or ←/→) to target, tap a card (or 1-4) to play it. Each enemy shows what it will do; nothing happens until you <b>End turn</b> (Space).</li>
-  <li><b>Block</b> soaks damage during the enemy turn, then clears. <b>Flee</b> (F): enemies still take their shown actions, then you escape if you survive.</li>
+  <li><b>Fight:</b> each turn you get 3 energy and 4 cards. Tap an enemy (or ←/→) to target, tap a card (or 1-4) to play it. Each enemy shows exactly what it will do; nothing happens until you <b>End turn</b> (Space).</li>
+  <li><b>Enemies:</b> grunts hit for 3; swarmlings have 3 HP (one Cleave); a <b>mage</b> shoots for 2, and at the start of your turn may say it will <b>revive</b> a pack-mate who fell on an earlier turn (at half HP, once per fight). Kill the mage first and the revive never happens. The gold-outlined <b>ELITE</b> captain and the Warlord <b>charge</b> before a heavy hit; the charge names the damage coming.</li>
+  <li><b>Fallen enemies</b> stay where they fell until the fight ends; then they're gone for good.</li>
+  <li><b>Block</b> soaks damage during the enemy turn, then clears. <b>Flee</b> (F): enemies still take their shown actions, then you escape if you survive. Elites and the Warlord remember where they were in their attack cycle, so a charged hit is still coming next time.</li>
   <li><b>Saving:</b> your run is saved on the server when a fight starts and after you win, flee or fall. Closing mid-fight brings you back to the moment that fight started.</li>
 </ul>`;
 
@@ -1274,16 +1408,24 @@ function resetToMenu() {
   runState = "menu";
 }
 
-/** Rebuilds the world from a checkpoint: enemies at home with their saved HP; killed ones stay gone. */
+/**
+ * Rebuilds the world from a checkpoint: enemies at home with their saved HP
+ * and action phase; confirmed-dead ones stay gone. Intents are generated
+ * fresh, from the saved phase, when the next fight starts.
+ */
 function startFromSave(save: SaveData, restored: boolean) {
   clearWorld();
   run = JSON.parse(JSON.stringify(save)) as SaveData;
   lastSavedAt = save.savedAt;
   for (const s of ENEMY_SPAWNS) {
     const hp = save.enemies[s.id] ?? s.maxHp;
-    if (hp > 0) enemies.push(spawnEnemy(s.x, s.y, hp, s.maxHp, s.boss, s.id));
+    if (hp > 0) enemies.push(spawnEnemy({ role: s.role, x: s.x, y: s.y, hp, phase: save.phases?.[s.id] ?? 0, spawnId: s.id, group: s.group }));
   }
   player.pos = k.vec2(save.player.x, save.player.y);
+  if (!restored && START_PARAM) {
+    const [x, y] = START_PARAM.split(",").map(Number);
+    if (Number.isFinite(x) && Number.isFinite(y)) player.pos = k.vec2(k.clamp(x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE), k.clamp(y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE));
+  }
   player.hp = save.player.hp;
   player.energy = PLAYER_MAX_ENERGY;
   player.block = 0;
@@ -1358,21 +1500,35 @@ for (const el of [ui.topbar, ui.dock, ui.overflow]) layoutObserver.observe(el);
 
 // ---------- dev-only test fights ----------
 
-// ?fight=GRUNTS,BOSS,X,Y puts the player at (X,Y) with that many grunts (plus
-// the boss if BOSS=1) stacked on one point beside them. Development builds
-// only, and saving is switched off so a test never writes a real save.
+// ?fight=N,BOSS,X,Y puts the player at (X,Y) with N lone grunts (plus the
+// Warlord and its pack if BOSS=1) stacked on one point beside them, extra
+// grunts spawned if N is larger than the map has. ?fight=group:north,ridge
+// alerts those camps and puts the player next to the first one. Development
+// builds only; saving is switched off, and pack leashes are disabled.
 function applyFightParam(raw: string) {
-  const [grunts = 3, withBoss = 0, x = 1100, y = 650] = raw.split(",").map(Number);
-  player.pos = k.vec2(k.clamp(x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE), k.clamp(y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE));
-  const side = player.pos.x > WORLD_WIDTH / 2 ? -1 : 1;
-  const spot = k.vec2(k.clamp(player.pos.x + side * 30, 30, WORLD_WIDTH - 30), player.pos.y);
-  for (let n = enemies.filter((e) => !e.isBoss).length; n < grunts; n++) {
-    enemies.push(spawnEnemy(spot.x, spot.y, TRASH_HP, TRASH_HP, false, null));
-  }
-  const picked = [...enemies.filter((e) => !e.isBoss).slice(0, grunts), ...(withBoss ? enemies.filter((e) => e.isBoss) : [])];
-  for (const e of picked) {
-    e.pos = spot.clone();
-    e.state = "chasing";
+  packsOverride = new Map([...PACKS].map(([id, p]) => [id, { ...p, leash: Infinity }]));
+  if (raw.startsWith("group:")) {
+    const ids = raw.slice(6).split(",");
+    const first = enemies.filter((e) => e.group === ids[0]);
+    if (!first.length) return;
+    const lead = first.reduce((a, b) => (a.role === "mage" ? b : a));
+    player.pos = k.vec2(k.clamp(lead.pos.x - 34, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE), lead.pos.y);
+    for (const e of enemies) if (e.group && ids.includes(e.group)) e.state = "chasing";
+  } else {
+    const [n = 3, withBoss = 0, x = 1100, y = 650] = raw.split(",").map(Number);
+    player.pos = k.vec2(k.clamp(x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE), k.clamp(y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE));
+    const side = player.pos.x > WORLD_WIDTH / 2 ? -1 : 1;
+    const spot = k.vec2(k.clamp(player.pos.x + side * 30, 30, WORLD_WIDTH - 30), player.pos.y);
+    const loners = () => enemies.filter((e) => e.groupKind === "skirmish" && e.tier === "normal");
+    for (let i = loners().length; i < n; i++) {
+      enemies.push(spawnEnemy({ role: "brute", x: spot.x, y: spot.y, hp: UNITS.brute.maxHp, phase: 0, spawnId: null, group: null }));
+    }
+    // N lone grunts; the boss brings its whole pack, as packs do
+    const picked = [...loners().slice(0, n), ...(withBoss ? enemies.filter((e) => e.group === "lair") : [])];
+    for (const e of picked) {
+      e.pos = spot.clone();
+      e.state = "chasing";
+    }
   }
   encounterCooldownUntil = 0;
   k.setCamPos(player.pos);
@@ -1437,9 +1593,9 @@ k.onUpdate(() => {
     player.pos.x = k.clamp(player.pos.x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE);
     player.pos.y = k.clamp(player.pos.y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE);
 
-    const explorers = enemies.filter((e) => e.exists());
-    for (const e of explorers) updateEnemyAI(e);
-    separate(explorers, k.dt(), { padding: SEPARATION_PADDING, speed: SEPARATION_SPEED, worldW: WORLD_WIDTH, worldH: WORLD_HEIGHT });
+    updateExploration();
+    const bodies = enemies.filter((e) => e.exists());
+    separate(bodies, k.dt(), { padding: SEPARATION_PADDING, speed: SEPARATION_SPEED, worldW: WORLD_WIDTH, worldH: WORLD_HEIGHT });
     if (now >= encounterCooldownUntil) tryTriggerEncounter(now);
   }
 
@@ -1472,19 +1628,19 @@ k.onUpdate(() => {
   k.setCamScale(scale, scale);
   k.setCamPos(clamped.x, clamped.y);
 
-  // Participants on stage are full, side-list participants are hidden from the
-  // map, bystanders are dimmed while a fight runs.
+  // Participants on stage are full (bodies faded), side-list participants are
+  // hidden from the map, bystanders are dimmed while a fight runs.
   for (const e of enemies) {
     if (!e.exists()) continue;
     const inFight = !!cur && cur.roster.includes(e);
-    const o = !cur ? 1 : inFight ? (e.overflow ? 0 : 1) : 0.3;
+    const o = !cur ? 1 : inFight ? (e.overflow ? 0 : e.unit.downed ? 0.45 : 1) : 0.3;
     e.opacity = o;
-    const hpL = hpLabelOf(e);
-    const stL = stateLabelOf(e);
-    if (hpL) hpL.opacity = o;
-    if (stL) stL.opacity = o;
+    for (const tag of ["enemyHpLabel", "enemyStateLabel", "enemyTagLabel", "enemyGlyph"]) {
+      const l = labelOf(e, tag);
+      if (l) l.opacity = inFight && e.unit.downed && tag === "enemyStateLabel" ? 1 : o;
+    }
   }
-  // Ground labels name the camps while exploring and get out of the way of
+  // Camp names name the camps while exploring and get out of the way of
   // HP / intent text during fights.
   const clearedNow = clearedAreas(checkpointPreview());
   for (const a of AREAS) {
@@ -1492,16 +1648,15 @@ k.onUpdate(() => {
     const text = cur ? "" : clearedNow.includes(a.id) ? `${a.name} (cleared)` : a.name;
     if (label && label.text !== text) label.text = text;
   }
+  updatePackHints();
 
-  if (cur && (!selectedTarget || !selectedTarget.exists() || !cur.roster.includes(selectedTarget))) {
-    const alive = aliveRoster();
-    selectedTarget = alive.find((e) => !e.overflow) ?? alive[0] ?? null;
+  if (cur && (!selectedTarget || !selectedTarget.exists() || selectedTarget.unit.downed || !cur.roster.includes(selectedTarget))) {
+    const st = standingRoster();
+    selectedTarget = st.find((e) => !e.overflow) ?? st[0] ?? null;
   }
   const markerOn = !!cur && cur.phase !== "unforming" && !!selectedTarget && selectedTarget.exists() && !selectedTarget.overflow;
   targetMarker.opacity = markerOn ? 1 : 0;
-  if (markerOn && selectedTarget) {
-    targetMarker.pos = selectedTarget.pos.add(0, selectedTarget.isBoss ? BOSS_LABELS.marker : TRASH_LABELS.marker);
-  }
+  if (markerOn && selectedTarget) targetMarker.pos = selectedTarget.pos.add(0, selectedTarget.labels.marker);
 
   updateCampPointer();
   renderHud();
@@ -1520,7 +1675,7 @@ k.onUpdate(() => {
   runNumber: run?.runNumber ?? null,
   stats: run?.stats ?? null,
   phase: activeEncounter?.phase ?? null,
-  turn: activeEncounter?.turnNumber ?? 0,
+  turn: activeEncounter?.fight.turn ?? 0,
   difficulty: activeEncounter?.difficulty ?? null,
   hp: player.hp,
   energy: player.energy,
@@ -1533,13 +1688,16 @@ k.onUpdate(() => {
   safe: measureSafe(),
   target: selectedTarget?.exists() ? selectedTarget.enemyId : null,
   pointer: campPointer.opacity > 0 ? { x: campPointer.pos.x, y: campPointer.pos.y, text: campPointer.text } : null,
+  packHints: [...packHints].filter(([, l]) => l.opacity > 0).map(([id, l]) => ({ id, text: l.text })),
   enemies: enemies
     .filter((e) => e.exists())
     .map((e) => {
       const s = k.toScreen(e.pos);
       return {
-        id: e.enemyId, spawnId: e.spawnId, boss: e.isBoss, hp: e.hp, block: e.block, state: e.state, overflow: e.overflow,
-        x: e.pos.x, y: e.pos.y, sx: s.x, sy: s.y, intent: e.intent ? intentText(e) : null,
+        id: e.enemyId, spawnId: e.spawnId, role: e.role, tier: e.tier, group: e.group, boss: e.tier === "boss", elite: e.tier === "elite",
+        hp: e.unit.hp, block: e.unit.block, downed: e.unit.downed, phase: e.unit.phase, reviveUsed: e.unit.reviveUsed,
+        state: e.state, overflow: e.overflow, x: e.pos.x, y: e.pos.y, sx: s.x, sy: s.y,
+        intent: e.unit.intent ? intentText(e) : null, label: stateLabelOf(e)?.text ?? "",
         engageX: e.engagePos?.x ?? null, engageY: e.engagePos?.y ?? null,
       };
     }),

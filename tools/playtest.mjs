@@ -8,6 +8,8 @@
 // save      stranger -> start -> real fight -> saved -> reload -> restored; two visitors isolated
 // viewports the save-loop core actions at 1920x1080 and on a 390x844 touch phone, plus a resize mid-fight
 // prodguard production only: ?fight= must not start a test fight
+// monsters  splitting skirmishers, whole packs, mage revive / cancel, elite cycle across flee + reload (dev server)
+// groups    each camp's fight + a big mixed fight laid out at 1920x1080 and 390x844 (dev server)
 // race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +20,9 @@ const SUITES = (args.find((a) => a.startsWith("--suite="))?.slice(8) ?? "combat,
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 9333;
 const OUT = process.env.SHOTS ?? "/tmp/shots";
-const TRASH_BOX = { left: -36, right: 36, top: -70, bottom: 18 };
+// keep in step with src/formation.ts
+const TRASH_BOX = { left: -40, right: 40, top: -70, bottom: 18 };
+const ELITE_BOX = { left: -48, right: 48, top: -96, bottom: 26 };
 const BOSS_BOX = { left: -58, right: 58, top: -108, bottom: 32 };
 const DECK = 14;
 mkdirSync(OUT, { recursive: true });
@@ -160,7 +164,7 @@ function layoutChecks(g, label) {
   const shown = fighters(g).filter((e) => !e.overflow);
   const s = g.cam.scale;
   const rects = shown.map((e) => {
-    const b = e.boss ? BOSS_BOX : TRASH_BOX;
+    const b = e.boss ? BOSS_BOX : e.elite ? ELITE_BOX : TRASH_BOX;
     return { x0: e.sx + b.left * s, y0: e.sy + b.top * s, x1: e.sx + b.right * s, y1: e.sy + b.bottom * s };
   });
   const safe = g.safe;
@@ -226,15 +230,22 @@ async function walkIntoFight() {
 async function combatSuite() {
   console.log("\n# combat rules & layout (dev ?fight=, 960x540)");
   await setViewport(960, 540);
-  let g = await open("?fight=3,1,1100,650");
+  let g = await open("?fight=3,1,1100,800");
   if (!check(g && g.saveStatus === "off", "test fights switch saving off")) return;
   g = await waitFor((s) => s.phase === "playerTurn");
-  check(!!g && fighters(g).length === 4, "stacked boss + 3 all joined; first turn started after formation");
+  check(!!g && fighters(g).length === 6, `3 stacked grunts + the Warlord's whole pack joined (${g && fighters(g).length})`);
+  await sleep(900);
+  g = await game();
+  layoutChecks(g, "warlord pack + 3");
+  await shot("c01_boss3");
+
+  g = await open("?fight=3,0,1100,800");
+  g = await waitFor((s) => s.phase === "playerTurn");
+  check(!!g && fighters(g).length === 3, "three stacked grunts all joined; first turn started after formation");
   check(fighters(g).every((e) => e.intent), "every participant shows an intent");
   await sleep(900);
   g = await game();
-  layoutChecks(g, "boss+3");
-  await shot("c01_boss3");
+  layoutChecks(g, "3 grunts");
 
   const before = g;
   await sleep(2000);
@@ -296,21 +307,22 @@ async function combatSuite() {
   check(Math.abs(g.cam.scale - g.base) < 0.02, "camera back to exploration zoom");
 
   console.log("\n# corners, crowds, overflow list, boss charge");
-  for (const [name, q] of [["topLeft_boss7", "7,1,16,16"], ["bottomRight_boss7", "7,1,2184,1284"], ["topRight_4", "4,0,2184,16"], ["centre_7", "7,0,1100,650"]]) {
+  for (const [name, q] of [["topLeft_boss7", "7,1,16,16"], ["bottomRight_boss7", "7,1,2184,1284"], ["topRight_4", "4,0,2184,16"], ["centre_7", "7,0,1100,800"]]) {
     await open(`?fight=${q}`);
     g = await waitFor((s) => s.phase === "playerTurn");
     await sleep(900);
     g = await game();
     layoutChecks(g, name);
-    check(fighters(g).length === Number(q.split(",")[0]) + Number(q.split(",")[1]), `${name}: every chaser joined`);
+    const want = Number(q.split(",")[0]) + (q.split(",")[1] === "1" ? 3 : 0);
+    check(fighters(g).length === want, `${name}: every chaser joined (${fighters(g).length}/${want})`);
     await shot(`c10_${name}`);
   }
-  await open("?fight=30,1,1100,650");
+  await open("?fight=30,1,1100,800");
   g = await waitFor((s) => s.phase === "playerTurn");
   await sleep(900);
   g = await game();
   const listed = fighters(g).filter((e) => e.overflow);
-  check(fighters(g).length === 31 && listed.length > 0, `31 joined; ${listed.length} that don't fit go to the side list`);
+  check(fighters(g).length === 33 && listed.length > 0, `33 joined; ${listed.length} that don't fit go to the side list`);
   layoutChecks(g, "overflow stage");
   await tapEl("#overflowList button:first-child");
   g = await game();
@@ -511,10 +523,203 @@ async function raceSuite() {
   check(api.runs.length === 2, `history has runs #1 and #2 (${api.runs.map((r) => "#" + r.runNumber).join(",")})`);
 }
 
+/** Starts a fresh saved run (dev ?start= puts the player somewhere), returns once playing. */
+async function freshRunAt(xy) {
+  await send("Network.enable");
+  await send("Network.clearBrowserCookies");
+  await open(`?start=${xy}`);
+  await waitText("#panel", /Start a run/);
+  await tapEl("#go");
+  await waitFor((s) => s.run === "playing" && !s.screen);
+  await waitText("#savePill", /Saved/);
+}
+
+/** Taps toward a map enemy until a fight starts. */
+async function walkTo(spawnId) {
+  for (let i = 0; i < 80; i++) {
+    const g = await game();
+    if (g.phase) return g;
+    const t = g.enemies.find((e) => e.spawnId === spawnId);
+    if (!t) return g;
+    const s = g.safe;
+    const on = t.sx > s.x0 && t.sx < s.x1 && t.sy > s.y0 && t.sy < s.y1;
+    await tap(on ? t.sx : g.pointer?.x ?? t.sx, on ? t.sy : g.pointer?.y ?? t.sy);
+    await sleep(200);
+  }
+  return game();
+}
+
+/** Reloads a dev test fight until the opening hand passes `ok`, so scripted turns can be played. */
+async function openFightWithHand(query, ok, tries = 25) {
+  for (let i = 0; i < tries; i++) {
+    await open(query);
+    const g = await waitFor((s) => s.phase === "playerTurn", 6000);
+    if (g && ok(g.piles.hand)) return g;
+  }
+  return null;
+}
+const count = (hand, name) => hand.filter((c) => c === name).length;
+
+async function playNamed(name, targetSpawnId) {
+  let g = await game();
+  if (targetSpawnId) {
+    const t = g.enemies.find((e) => e.spawnId === targetSpawnId);
+    await tap(t.sx, t.sy);
+  }
+  g = await game();
+  const i = g.piles.hand.indexOf(name);
+  if (i < 0) return false;
+  await key(String(i + 1));
+  return true;
+}
+
+async function monstersSuite() {
+  console.log("\n# skirmishers can be split; a pack comes whole (real exploration, saved run)");
+  await setViewport(1280, 800);
+  await freshRunAt("440,380");
+  let g = await walkTo("west-1");
+  g = await waitFor((s) => s.phase === "playerTurn");
+  const roster = (s) => s.enemies.filter((e) => e.state === "engaged").map((e) => e.spawnId).sort();
+  check(JSON.stringify(roster(g)) === JSON.stringify(["west-1"]), `approaching from the west pulls one scout alone (${roster(g)})`);
+  await fightToEnd(true);
+
+  await freshRunAt("830,1135");
+  g = await game();
+  check(g.packHints.some((h) => h.id === "hollow" && /Swarm · 3 together/.test(h.text)), `near the hollow the ground says what's coming (${g.packHints.map((h) => h.text).join(" | ")})`);
+  await shot("m01_pack_hint");
+  g = await walkTo("swarm-1");
+  g = await waitFor((s) => s.phase === "playerTurn");
+  check(JSON.stringify(roster(g)) === JSON.stringify(["swarm-1", "swarm-2", "swarm-3"]), `touching one swarmling brings all three, and nobody else (${roster(g)})`);
+  check(g.difficulty === "normal", `a swarm of three is framed as a normal fight (${g.difficulty})`);
+  await shot("m02_swarm_fight");
+  const ci = g.piles.hand.indexOf("Cleave");
+  if (ci >= 0) {
+    await key(String(ci + 1));
+    g = await waitFor((s) => s.phase === null, 3000);
+    check(!!g && !g.enemies.some((e) => e.group === "hollow"), "one Cleave clears the whole swarm");
+  } else await fightToEnd(true);
+
+  console.log("\n# the mage: revive shown, revive done, revived grunt acts next turn (dev ?fight=group:north)");
+  g = await openFightWithHand("?fight=group:north", (h) => count(h, "Strike") >= 1);
+  check(!!g, "got a hand with a Strike");
+  if (g) {
+    check(g.difficulty === "dangerous", "a mage guard is framed as a dangerous fight");
+    const ids = roster(g);
+    check(JSON.stringify(ids) === JSON.stringify(["north-1", "north-2", "north-mage"]), `the mage pack joins whole; the lone sentry stays out (${ids})`);
+    await playNamed("Strike", "north-1");
+    g = await game();
+    const n1 = g.enemies.find((e) => e.spawnId === "north-1");
+    check(!!n1 && n1.downed && n1.label === "", `north-1 is down in its slot (label “${n1?.label}”), with no revive planned yet`);
+    const mageTurn1 = g.enemies.find((e) => e.spawnId === "north-mage").intent;
+    check(mageTurn1 === "SHOOT 2", `the mage's turn-1 intent stays what it showed (“${mageTurn1}”)`);
+    await key(" ");
+    g = await waitFor((s) => s.phase === "playerTurn" && s.turn === 2, 8000);
+    const mage = g.enemies.find((e) => e.spawnId === "north-mage");
+    const body = g.enemies.find((e) => e.spawnId === "north-1");
+    check(mage.intent === "REVIVE +3", `turn 2: the mage shows REVIVE +3 (“${mage.intent}”)`);
+    check(body.label === "↺ +3 HP", `the body shows it's the target (“${body.label}”)`);
+    check(/will revive Grunt \(north-1\) at 3 HP/.test(await evaluate(`document.getElementById("feedback").innerText`)), "the HUD names who will be revived and for how much");
+    await shot("m03_revive_shown");
+    const slot = { x: body.x, y: body.y };
+    await key(" ");
+    g = await waitFor((s) => s.phase === "playerTurn" && s.turn === 3, 8000);
+    const back = g.enemies.find((e) => e.spawnId === "north-1");
+    check(!back.downed && back.hp === 3, `north-1 is back on 3 HP (hp ${back.hp}, downed ${back.downed})`);
+    check(Math.hypot(back.x - slot.x, back.y - slot.y) < 0.5, "it came back in its own slot");
+    check(back.intent === "ATK 3", `and acts normally the next turn (“${back.intent}”)`);
+    check(g.enemies.find((e) => e.spawnId === "north-mage").intent === "SHOOT 2", "the mage won't revive again this fight");
+    await tap(back.sx, back.sy);
+    check((await game()).target === back.id, "the revived grunt can be targeted");
+    await shot("m04_revived");
+  }
+
+  console.log("\n# killing the mage cancels its revive");
+  g = await openFightWithHand("?fight=group:north", (h) => count(h, "Strike") >= 1);
+  if (g) {
+    await playNamed("Strike", "north-1");
+    await key(" ");
+    let ok = false;
+    for (let tries = 0; tries < 30 && !ok; tries++) {
+      g = await waitFor((s) => s.phase === "playerTurn" && s.turn >= 2, 8000);
+      const mage = g?.enemies.find((e) => e.spawnId === "north-mage");
+      if (!g || !mage || mage.intent !== "REVIVE +3") break;
+      // spend the turn on the mage: Focus, then Strikes / Cleave until it falls or cards run out
+      for (const card of ["Focus", "Strike", "Strike", "Cleave", "Strike"]) {
+        const cur = await game();
+        const m = cur.enemies.find((e) => e.spawnId === "north-mage");
+        if (!m || m.downed) break;
+        await playNamed(card, card === "Focus" || card === "Cleave" ? null : "north-mage");
+      }
+      g = await game();
+      ok = !!g.enemies.find((e) => e.spawnId === "north-mage")?.downed;
+      if (!ok) break;
+    }
+    if (ok) {
+      check(g.enemies.find((e) => e.spawnId === "north-1").label === "", "with the mage down, the body no longer shows a revive");
+      await key(" ");
+      g = await waitFor((s) => s.phase === "playerTurn" || s.phase === null, 8000);
+      check(!g.enemies.some((e) => e.spawnId === "north-1" && !e.downed), "north-1 stayed down: the revive never happened");
+    } else console.log("  (couldn't down the mage in one turn with this hand; covered by src/combat.test.ts)");
+  }
+
+  console.log("\n# the captain's cycle survives a flee and a reload (real exploration, saved run)");
+  await freshRunAt("1440,1095");
+  g = await walkTo("ridge-1");
+  g = await waitFor((s) => s.phase === "playerTurn");
+  const cap = (s) => s.enemies.find((e) => e.spawnId === "ridge-captain");
+  check(JSON.stringify(roster(g)) === JSON.stringify(["ridge-1", "ridge-2", "ridge-captain"]), `the captain's pack joins whole (${roster(g)})`);
+  check(cap(g).intent === "ATK 4" && cap(g).elite, `turn 1: the ELITE captain shows ATK 4 (“${cap(g).intent}”)`);
+  await shot("m05_captain_turn1");
+  await key(" ");
+  g = await waitFor((s) => s.phase === "playerTurn" && s.turn === 2, 8000);
+  check(cap(g).intent === "CHARGE\nnext: ATK 10", `turn 2: CHARGE naming the 10 coming (“${cap(g).intent}”)`);
+  await key("f");
+  g = await waitFor((s) => s.phase === null, 10000);
+  check(!!g && g.run === "playing", `fled after the charge resolved (HP ${g?.hp})`);
+  await waitText("#savePill", /Saved/, 8000);
+  const api = await apiState();
+  check(api.save.phases["ridge-captain"] === 2, `the server saved the captain at phase 2 (the heavy hit) (${api.save.phases["ridge-captain"]})`);
+  await send("Page.reload");
+  await sleep(500);
+  await waitText("#panel", /Welcome back/);
+  await tapEl("#go");
+  await waitFor((s) => s.run === "playing" && !s.screen);
+  await sleep(2700); // load protection
+  g = await walkTo("ridge-1");
+  g = await waitFor((s) => s.phase === "playerTurn", 10000);
+  check(!!g && cap(g)?.intent === "HEAVY ATK 10", `after the reload the captain opens with the charged HEAVY ATK 10 (“${g && cap(g)?.intent}”)`);
+  await shot("m06_captain_resumed");
+}
+
+async function groupLayoutSuite() {
+  console.log("\n# every camp's fight is readable at both marking viewports");
+  for (const [w, h, mob, label] of [[1920, 1080, false, "1920x1080"], [390, 844, true, "390x844"]]) {
+    await setViewport(w, h, mob);
+    for (const grp of ["north", "ridge", "lair", "hollow"]) {
+      await open(`?fight=group:${grp}`);
+      let g = await waitFor((s) => s.phase === "playerTurn", 8000);
+      if (!check(!!g, `${label} ${grp}: fight started`)) continue;
+      await sleep(900);
+      g = await game();
+      layoutChecks(g, `${label} ${grp}`);
+      const outlined = await evaluate(`JSON.stringify(window.__game().enemies.filter(e => e.state === "engaged").length)`);
+      void outlined;
+      await shot(`g_${grp}_${label}`);
+    }
+    await open("?fight=9,1,1100,800");
+    let g = await waitFor((s) => s.phase === "playerTurn", 8000);
+    await sleep(900);
+    g = await game();
+    layoutChecks(g, `${label} big mixed fight (${fighters(g).length})`);
+    await shot(`g_mixed_${label}`);
+  }
+  await setViewport(1280, 800);
+}
+
 async function prodGuardSuite() {
   console.log("\n# production build: test entry points are off");
   await setViewport(1280, 800);
-  const g = await open("?fight=3,1,1100,650");
+  const g = await open("?fight=3,1,1100,800");
   const text = await waitText("#panel", /Start a run|Welcome back|Your last run/);
   check(/Start a run|Welcome back|Your last run/.test(text) && g.saveStatus !== "off" && g.phase === null, "?fight= is ignored: the normal start screen shows and saving stays on");
 }
@@ -530,6 +735,8 @@ async function main() {
     else if (s === "viewports") await viewportSuite();
     else if (s === "prodguard") await prodGuardSuite();
     else if (s === "race") await raceSuite();
+    else if (s === "monsters") await monstersSuite();
+    else if (s === "groups") await groupLayoutSuite();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }
