@@ -12,7 +12,7 @@ import {
   totalCards,
 } from "./cards.ts";
 import { BOSS_BOX, boxAt, clampCam, formationBounds, layoutFormation, planCamera, TRASH_BOX, type Rect, type Viewport } from "./formation.ts";
-import { SaveClient, type SavePayload, type SaveStatus } from "./net.ts";
+import { SaveClient, SaveFlowError, type SavePayload, type SaveStatus } from "./net.ts";
 import { clearedAreas, killedCount, newRun, type CheckpointReason, type SaveData } from "./save.ts";
 import { selectRoster } from "./encounter.ts";
 import { separate } from "./separation.ts";
@@ -1086,11 +1086,20 @@ function confirmErase(p: SavePayload) {
       yes: async () => {
         const word = ui.panel.querySelector<HTMLInputElement>("#eraseWord")?.value.trim();
         if (word !== "ERASE") return showFeedbackInPanel("Type ERASE exactly to confirm.");
+        const btn = ui.panel.querySelector<HTMLButtonElement>("#yes");
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Erasing…";
+        }
         try {
           const fresh = await saveClient.erase();
           resetToMenu();
           showStartScreen(fresh);
         } catch (e) {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = "Erase everything";
+          }
           showFeedbackInPanel(`Couldn't erase: ${(e as Error).message}`);
         }
       },
@@ -1202,23 +1211,49 @@ ui.menuBtn.addEventListener("click", () => openMenu());
 
 // ---------- run lifecycle ----------
 
-async function beginNewRun() {
+// Every way of starting a run (end-screen button, R, the menu's confirm, a
+// retry) comes through here. The save client does the ordering: it sends any
+// unconfirmed checkpoint first, so the run being left is archived with its
+// real result. This guard just stops a second trigger stacking up screens.
+let startingRun = false;
+async function beginNewRun(opts: { discardUnsaved?: boolean } = {}) {
+  if (startingRun) return;
   if (!saveClient.enabled) {
     startFromSave(newRun(`run_offline${Date.now()}`, (run?.runNumber ?? 0) + 1, Date.now()), false);
     return;
   }
-  showScreen(`<h1 id="panelTitle">Starting a run…</h1><p>Asking the server for a fresh run.</p>`);
+  startingRun = true;
+  showScreen(
+    saveClient.unsaved && !opts.discardUnsaved
+      ? `<h1 id="panelTitle">Saving your last result…</h1><p>Your run's final checkpoint is still on its way to the server. The new run starts as soon as it's confirmed.</p>`
+      : `<h1 id="panelTitle">Starting a run…</h1><p>Asking the server for a fresh run.</p>`,
+  );
   try {
-    const p = await saveClient.startRun();
+    const p = await saveClient.startRun(opts);
     lastPayload = p;
     if (p.save) startFromSave(p.save, false);
   } catch (e) {
-    if ((e as { status?: number }).status === 409) return showConflictScreen((e as Error).message);
+    if (e instanceof SaveFlowError && e.reason === "conflict") return showConflictScreen(e.message);
+    if (e instanceof SaveFlowError) {
+      const back = () => (runState === "dead" || runState === "won" ? showEndScreen() : hideScreen());
+      return showScreen(
+        `<h1 id="panelTitle">Your last result isn't saved</h1>
+         <p>${escapeHtml(e.message)}. Nothing has changed on the server yet, and your current run is still there.</p>
+         <div class="buttons">
+           ${e.reason === "unsaved" ? `<button class="primary" id="retry">Retry saving, then start</button>` : ""}
+           <button class="danger" id="discard">Start anyway (lose the unsaved result)</button>
+           <button id="back">Back</button>
+         </div>`,
+        { retry: () => void beginNewRun(), discard: () => void beginNewRun({ discardUnsaved: true }), back },
+      );
+    }
     showScreen(
-      `<h1 id="panelTitle">Couldn't start a run</h1><p>${escapeHtml((e as Error).message)}. Nothing was changed.</p>
+      `<h1 id="panelTitle">Couldn't start a run</h1><p>${escapeHtml((e as Error).message)}. Your last result is saved; no new run was created.</p>
        <div class="buttons"><button class="primary" id="retry">Try again</button></div>`,
       { retry: () => void beginNewRun() },
     );
+  } finally {
+    startingRun = false;
   }
 }
 
@@ -1269,6 +1304,10 @@ document.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
   if (screenOpen()) {
     if (key === "escape" && screenCloseable) hideScreen();
+    // the end screen advertises R; it goes through the same guarded entry as the button
+    else if (key === "r" && !e.repeat && (runState === "dead" || runState === "won") && !(e.target instanceof HTMLInputElement)) {
+      void beginNewRun();
+    }
     return;
   }
   if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;

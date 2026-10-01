@@ -8,6 +8,7 @@
 // save      stranger -> start -> real fight -> saved -> reload -> restored; two visitors isolated
 // viewports the save-loop core actions at 1920x1080 and on a 390x844 touch phone, plus a resize mid-fight
 // prodguard production only: ?fight= must not start a test fight
+// race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 
@@ -439,6 +440,77 @@ async function viewportSuite() {
   } else check(false, "phone: walked into a fight");
 }
 
+async function apiState() {
+  return JSON.parse(await evaluate(`fetch("/api/save").then(r => r.json()).then(j => JSON.stringify(j))`));
+}
+async function network(conditions) {
+  await send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1, ...conditions });
+}
+
+async function raceSuite() {
+  console.log("\n# race: New run while the victory checkpoint is still in flight (real server, slow network)");
+  await setViewport(1280, 800);
+  await send("Network.enable");
+  await send("Network.clearBrowserCookies");
+  await network({});
+  await open("");
+  await waitText("#panel", /Start a run/);
+  await tapEl("#go");
+  await waitFor((s) => s.run === "playing" && !s.screen);
+  await waitText("#savePill", /Saved/);
+  await walkIntoFight();
+  await waitFor((s) => s.phase === "playerTurn");
+  await network({ latency: 1500 });
+  let g = await fightToEnd(true);
+  check(g.phase === null && g.run === "playing", "won the fight on a 1.5 s-latency connection");
+  const pillNow = await evaluate(`document.getElementById("savePill").innerText`);
+  check(!/Saved/.test(pillNow), `right after the win the pill doesn't claim Saved yet (“${pillNow}”)`);
+  await key("Escape");
+  await tapEl("#new");
+  await tapEl("#yes");
+  await tapEl("#yes"); // a double click on the confirm button
+  const waiting = await evaluate(`document.getElementById("panel").innerText`);
+  check(/Saving your last result|Starting a run/.test(waiting), `a wait screen replaces the buttons (“${waiting.split("\n")[0]}”)`);
+  g = await waitFor((s) => s.run === "playing" && !s.screen && s.runNumber === 2, 15000);
+  check(!!g, "run #2 started once the victory was confirmed");
+  await network({});
+  let api = await apiState();
+  check(api.save.runNumber === 2 && api.runs.length === 1, `exactly one new run was created (history: ${api.runs.map((r) => "#" + r.runNumber).join(",")})`);
+  check(api.runs[0]?.runNumber === 1 && api.runs[0]?.wins >= 1, `run #1 was archived with its victory (wins ${api.runs[0]?.wins}, outcome ${api.runs[0]?.outcome})`);
+  check(/Saved/.test(await waitText("#savePill", /Saved/)), "the new run shows Saved");
+
+  console.log("\n# race: the final checkpoint can't reach the server");
+  await walkIntoFight();
+  await waitFor((s) => s.phase === "playerTurn");
+  g = await fightToEnd(true);
+  await network({ offline: true });
+  // the victory checkpoint is sent the moment the fight ends, so cut the network first and
+  // then trigger one more checkpoint-worthy event: walking into the next fight saves "engage"
+  await network({});
+  await network({ offline: true });
+  await walkIntoFight();
+  await waitFor((s) => s.phase === "playerTurn", 8000);
+  await sleep(500);
+  const offlinePill = await evaluate(`document.getElementById("savePill").innerText`);
+  check(/retrying|Not saved/i.test(offlinePill), `offline, the pill says the checkpoint isn't saved (“${offlinePill}”)`);
+  await key("Escape");
+  await tapEl("#new");
+  await tapEl("#yes");
+  const failText = await waitText("#panel", /isn't saved/, 8000);
+  check(/isn't saved/.test(failText) && /Retry saving/.test(failText), "New run is refused with a clear 'last result isn't saved' screen and a Retry button");
+  api = null;
+  await network({});
+  api = await apiState();
+  check(api.save.runNumber === 2, "nothing changed on the server while offline (still run #2)");
+  await tapEl("#retry");
+  g = await waitFor((s) => s.run === "playing" && !s.screen && s.runNumber === 3, 15000);
+  check(!!g, "Retry saved the checkpoint and started run #3");
+  api = await apiState();
+  const r2 = api.runs.find((r) => r.runNumber === 2);
+  check(!!r2 && r2.wins >= 1, `run #2 kept its fights in history (wins ${r2?.wins}, outcome ${r2?.outcome})`);
+  check(api.runs.length === 2, `history has runs #1 and #2 (${api.runs.map((r) => "#" + r.runNumber).join(",")})`);
+}
+
 async function prodGuardSuite() {
   console.log("\n# production build: test entry points are off");
   await setViewport(1280, 800);
@@ -457,6 +529,7 @@ async function main() {
     else if (s === "save") await saveSuite();
     else if (s === "viewports") await viewportSuite();
     else if (s === "prodguard") await prodGuardSuite();
+    else if (s === "race") await raceSuite();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }

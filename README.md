@@ -37,9 +37,9 @@ up later, and not be hurried while they think.
    including 300 random fights.
 6. **Your run is still there tomorrow.** The server saves a checkpoint when a
    fight starts and after you win, flee or fall. "Saved" appears only after
-   the server confirms, and a killed enemy can't come back. *Enforced:*
-   `spec/saves.test.ts` and `tools/persistence-check.sh`, which survives a
-   restart and a rebuild.
+   the server confirms, a run's final result is saved before the next run
+   starts, and a killed enemy can't come back. *Enforced:* `src/net.test.ts`,
+   `spec/saves.test.ts`, and `tools/persistence-check.sh` (restart, rebuild).
 7. **A phone is a full controller.** Tap to move, tap enemies and cards, with
    text that stays readable. *Judged, with checks:* `tools/playtest.mjs`
    plays a whole save loop with touch input on a 390x844 screen.
