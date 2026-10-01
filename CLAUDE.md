@@ -51,9 +51,23 @@ Kaplay and the DOM so they stay testable.
 - Load before starting: a default new game must never overwrite a save.
 - Show "Saved" only after the server confirmed that exact checkpoint. Retry
   transient failures, and show conflict and failure states.
+- Every save write (checkpoint, new run, erase) goes through `SaveClient`'s
+  one ordered queue. Never call `/api` writes from anywhere else. A new run
+  may only start after the last checkpoint is confirmed, or after the player
+  explicitly chooses to discard it. A response or retry from before a new run
+  or erase must not change anything. `src/net.test.ts` holds this.
+- Every way to trigger an action (button, key, repeat click) goes through the
+  same entry point.
 - The server validates every save (`validateSave`, `checkProgression`). Only
   an explicit `{"confirm":"erase"}` deletes data; a new run archives the old.
 - `?fight=` and other test entry points are development-only and never save.
+
+## Words match the code
+
+- README, the in-game how-to and the hints describe rules as the code runs
+  them (e.g. only chasers within `JOIN_RADIUS` join a fight). When a rule
+  changes, change the words in the same commit, and keep a test of the rule
+  itself (`src/encounter.test.ts`, `src/turn.test.ts`, ...).
 
 ## Kaplay traps that already broke a build
 
@@ -72,6 +86,7 @@ pnpm test:unit                      # rule tests, no app needed
 pnpm dev                            # app + API on :8080 (saves in .data/)
 APP_URL=http://localhost:8080 pnpm check   # rules + spec/ against the running app
 pnpm playtest                       # real Chrome: combat, save loop, both viewports
+node tools/playtest.mjs --suite=race   # new run vs a slow / offline final save
 sh tools/persistence-check.sh       # saves survive restart and rebuild (Docker)
 pnpm check:evidence
 ```

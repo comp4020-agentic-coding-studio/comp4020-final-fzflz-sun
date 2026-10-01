@@ -24,6 +24,14 @@ a queued enemy resolve, none of which serialise cleanly.
   stats never go backwards, ended runs are final).
 - **Loss:** a new run archives the old one into history; only an explicit
   `{"confirm":"erase"}` (typed ERASE in the UI) deletes data.
+- **Ordering (added 2026-10-01):** the client sends every write (checkpoint,
+  new run, erase) through one queue, in order, each with the revision the
+  previous one produced. A new run first sends any unconfirmed checkpoint, so
+  the run is archived with its real result; if that checkpoint can't be sent
+  the new run is refused unless the player chooses to discard it. New run and
+  erase bump a generation, so older responses and retries are ignored. This
+  replaced a first version where New run could overtake the final victory
+  save and archive the run as "abandoned".
 
 ## Costs
 
@@ -32,3 +40,5 @@ a queued enemy resolve, none of which serialise cleanly.
 - The client is still the authority on what happened in a fight; the server
   only rejects impossible states, not unlikely ones.
 - Walking around after the last checkpoint isn't saved.
+- Starting a new run waits for the network; offline, it can't start without
+  discarding the unsent result, by explicit choice.

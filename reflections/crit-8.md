@@ -1,36 +1,40 @@
 # Crit 8 reflection: It's alive!
 
-<!-- DRAFT assembled by the agent from our sessions. Every factual claim below
-     happened; the judgement calls are marked "AUTHOR:" — rewrite them in your
-     own words, then delete these comments. -->
+<!-- DRAFT, assembled by the agent from our sessions and the commit history.
+     Facts below were checked against the conversation and the repo. Sentences
+     marked CONFIRM are personal judgements only you can make: keep, rewrite
+     or delete each one, then delete all of these comments before the cutoff
+     (Wed 7 Oct, 13:30). -->
 
 ## What was the breakthrough that moved the work forward?
 
 The breakthrough was turning "it feels wrong" into a rule the agent could be
-held to. For three versions I kept rejecting builds by feel. Moving during
-combat made it an action grinder. Timed enemy attacks made reading my hand
-cost HP. Crowds made intents unreadable. What moved things was naming the
-principle behind each complaint: *thinking should be free, and the player
-chooses the size of every fight.* Once I wrote it down, it became a phase
-machine with tests, a formation layout with tests, and promises in the
-README. After that the agent's work could be checked against something other
-than my mood.
+held to. Most of my corrections started as a feeling during play. Moving
+during combat felt like an action grinder. Timed enemy attacks made reading
+my hand cost HP. Crowds made intents unreadable. What moved things was naming
+the principle behind those complaints: *thinking should be free, and the
+player chooses the size of every fight.* Once it was written down, it became
+a phase machine with tests, a formation layout with tests, and promises in
+the README. After that the agent's work could be checked against something
+other than my reaction to it.
+<!-- CONFIRM: is this the breakthrough you'd pick? Other moments from the
+     record: v2 locking movement in combat, or v4 switching to strict turns. -->
 
-The second turn was when the agent called v5 finished and it didn't load.
-Typecheck and build were green. Only a real browser showed the crash. Now
-browser playtests are part of "done".
-
-<!-- AUTHOR: is this the breakthrough you'd pick? Alternatives from the record:
-     the first build that locked movement in combat (v2), or the turn-based switch (v4). -->
+The second turn came when the agent reported v5 as finished, and it didn't
+even load. Typecheck and build were green. Only a real browser showed the
+crash. Browser playtests are now part of what "done" means in `CLAUDE.md`.
 
 ## What did this work change about who I want to be as a software developer?
 
-I want to be a developer who directs by evidence. In this project my review
-was playing, not reading diffs, and that worked for feel. It didn't catch a
-game that never started, because I trusted the report. I want to keep the
-fast loop of specifying, playing and correcting. I also want every claim of
-"done" to come with something I can check myself: a test, a screenshot or a
-reproducible run.
-
-<!-- AUTHOR: say in your own words how it felt to discover the "done" build
-     didn't run, and whether "directing by evidence" is really your takeaway. -->
+<!-- CONFIRM: this whole answer is a proposal built from what happened; the
+     feelings and the takeaway have to be yours. -->
+I want to be a developer who directs by evidence.
+<!-- CONFIRM: true of how you reviewed? -->
+In this project I reviewed by playing, not by reading diffs, and that worked
+for how the game felt. It didn't catch a game that never started.
+<!-- CONFIRM: did you trust the report? -->
+I had trusted the report. The same thing showed up in the words: the README
+said every chasing enemy joins a fight, while the code only took nearby
+ones. I want to keep the fast loop of specifying, playing and correcting,
+and make every "done" come with something I can check myself: a test, a
+screenshot or a run I can repeat.
