@@ -28,6 +28,8 @@ export interface Viewport {
   worldH: number;
   /** Screen-space rect left clear of the HUD, hand, buttons and side list. */
   safe: Rect;
+  /** Exploration zoom (screen px per world unit); fights never frame tighter than they must. Defaults to 1. */
+  baseScale?: number;
 }
 
 export interface Unit {
@@ -70,18 +72,20 @@ function angleDiff(a: number, b: number) {
 
 /** World region a scale-1 camera can show inside the safe rect, even when clamped at map edges. */
 export function visibleRegion(v: Viewport): Rect {
+  const s = v.baseScale ?? 1;
   return {
-    x0: v.safe.x0,
-    y0: v.safe.y0,
-    x1: v.worldW - (v.viewW - v.safe.x1),
-    y1: v.worldH - (v.viewH - v.safe.y1),
+    x0: v.safe.x0 / s,
+    y0: v.safe.y0 / s,
+    x1: v.worldW - (v.viewW - v.safe.x1) / s,
+    y1: v.worldH - (v.viewH - v.safe.y1) / s,
   };
 }
 
 /** A safe-rect-sized world area that contains the player, leans toward the enemies and stays on-map. */
 export function stageRect(anchor: V, dir: V, v: Viewport): Rect {
-  const w = v.safe.x1 - v.safe.x0;
-  const h = v.safe.y1 - v.safe.y0;
+  const scale = v.baseScale ?? 1;
+  const w = (v.safe.x1 - v.safe.x0) / scale;
+  const h = (v.safe.y1 - v.safe.y0) / scale;
   const margin = 30;
   const cx = clamp(anchor.x + dir.x * w * 0.2, anchor.x - w / 2 + margin, anchor.x + w / 2 - margin);
   const cy = clamp(anchor.y + dir.y * h * 0.2, anchor.y - h / 2 + margin, anchor.y + h / 2 - margin);
@@ -200,9 +204,10 @@ export function formationBounds(units: Unit[], slots: Map<number, V>, anchor: V)
 export function clampCam(center: V, scale: number, v: Viewport): V {
   const halfW = v.viewW / (2 * scale);
   const halfH = v.viewH / (2 * scale);
+  // A view wider than the map (shouldn't happen once baseScale covers it) centres instead.
   return {
-    x: clamp(center.x, halfW, v.worldW - halfW),
-    y: clamp(center.y, halfH, v.worldH - halfH),
+    x: halfW * 2 >= v.worldW ? v.worldW / 2 : clamp(center.x, halfW, v.worldW - halfW),
+    y: halfH * 2 >= v.worldH ? v.worldH / 2 : clamp(center.y, halfH, v.worldH - halfH),
   };
 }
 
@@ -223,23 +228,36 @@ export function fitsSafe(bounds: Rect, center: V, scale: number, v: Viewport): b
 /**
  * Frames the bounds inside the safe rect. Zoom is the largest allowed value
  * that still shows everything once the camera is clamped to the map; normal
- * fights pass {min: 1, max: 1} and so only pan.
+ * fights pass min = max and so only pan. If nothing fits (a player pinned in
+ * a map corner sits under the HUD whatever the camera does), the largest zoom
+ * at which `core` (the enemies) fits wins instead of zooming out to the floor.
  */
-export function planCamera(bounds: Rect, v: Viewport, zoom: { min: number; max: number }) {
-  const safeW = v.safe.x1 - v.safe.x0;
-  const safeH = v.safe.y1 - v.safe.y0;
-  const bw = Math.max(1, bounds.x1 - bounds.x0);
-  const bh = Math.max(1, bounds.y1 - bounds.y0);
+export function planCamera(
+  bounds: Rect,
+  v: Viewport,
+  zoom: { min: number; max: number },
+  core?: Rect,
+): { center: V; scale: number } {
   const safeCx = (v.safe.x0 + v.safe.x1) / 2;
   const safeCy = (v.safe.y0 + v.safe.y1) / 2;
-  let scale = clamp(Math.min(safeW / bw, safeH / bh), zoom.min, zoom.max);
-  for (;;) {
+  const at = (scale: number) => {
     const raw = {
       x: (bounds.x0 + bounds.x1) / 2 - (safeCx - v.viewW / 2) / scale,
       y: (bounds.y0 + bounds.y1) / 2 - (safeCy - v.viewH / 2) / scale,
     };
-    const center = clampCam(raw, scale, v);
-    if (fitsSafe(bounds, center, scale, v) || scale <= zoom.min) return { center, scale };
-    scale = Math.max(zoom.min, scale - 0.05);
+    return { center: clampCam(raw, scale, v), scale };
+  };
+  // Search from the tightest allowed zoom outwards: the map-edge clamp makes
+  // fit non-monotonic in scale, so an estimate can start past the answer.
+  const floor = v.baseScale ?? zoom.min;
+  let coreFit: { center: V; scale: number } | null = null;
+  for (let scale = zoom.max; ; scale = Math.max(zoom.min, scale - 0.05)) {
+    const plan = at(scale);
+    if (fitsSafe(bounds, plan.center, scale, v)) return plan;
+    if (!coreFit && core && fitsSafe(core, plan.center, scale, v)) coreFit = plan;
+    // Below exploration zoom, a frame showing every enemy beats zooming out
+    // further only to get a corner-pinned player clear of the HUD.
+    if (coreFit && scale <= floor) return coreFit;
+    if (scale <= zoom.min) return coreFit ?? plan;
   }
 }

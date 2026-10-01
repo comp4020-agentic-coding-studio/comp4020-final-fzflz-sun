@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { VIEWPORT, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
+import { FHD_VIEWPORT, PHONE_VIEWPORT, VIEWPORT, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
 import {
   BOSS_BOX,
   PLAYER_BOX,
@@ -60,12 +60,14 @@ const CASES: [string, number, boolean][] = [
   ["boss + 7 (whole map)", 7, true],
 ];
 
-describe("encounter formation", () => {
+const VIEWPORTS = { "960x540": VIEWPORT, "1920x1080": FHD_VIEWPORT, "390x844": PHONE_VIEWPORT };
+
+describe.each(Object.entries(VIEWPORTS))("encounter formation at %s", (_vpName, VP) => {
   for (const [anchorName, anchor] of Object.entries(ANCHORS)) {
     for (const [label, n, boss] of CASES) {
       it(`${label} at ${anchorName}: every enemy slotted, nothing overlaps, all readable on screen`, () => {
         const units = crowd(anchor, n, boss);
-        const f = layoutFormation(units, anchor, VIEWPORT);
+        const f = layoutFormation(units, anchor, VP);
 
         expect(f.overflow).toEqual([]);
         expect(f.slots.size).toBe(units.length);
@@ -81,22 +83,25 @@ describe("encounter formation", () => {
         // Both camera modes keep every enemy footprint (body, HP, intent,
         // marker) inside the safe rect, and the camera itself stays on-map.
         const bounds = formationBounds(units, f.slots, anchor);
-        for (const zoom of [{ min: 1, max: 1 }, { min: 1, max: 1.5 }]) {
-          const cam = planCamera(bounds, VIEWPORT, zoom);
-          const clamped = clampCam(cam.center, cam.scale, VIEWPORT);
+        for (const zoom of [{ min: VP.baseScale!, max: VP.baseScale! }, { min: VP.baseScale!, max: VP.baseScale! * 1.5 }]) {
+          const cam = planCamera(bounds, VP, zoom);
+          const clamped = clampCam(cam.center, cam.scale, VP);
           expect(clamped).toEqual(cam.center);
           for (const u of units) {
-            const onScreen = boundsOnScreen(footprint(u, f.slots.get(u.id)!), cam.center, cam.scale, VIEWPORT);
-            expect(inside(onScreen, VIEWPORT.safe)).toBe(true);
+            const onScreen = boundsOnScreen(footprint(u, f.slots.get(u.id)!), cam.center, cam.scale, VP);
+            expect(inside(onScreen, VP.safe)).toBe(true);
           }
           const body = { left: -16, right: 16, top: -16, bottom: 16 }; // player circle, clamped 16px from edges
-          const p = boundsOnScreen(boxAt(anchor, body), cam.center, cam.scale, VIEWPORT);
-          expect(inside(p, { x0: 0, y0: 0, x1: VIEWPORT.viewW, y1: VIEWPORT.viewH })).toBe(true);
+          const p = boundsOnScreen(boxAt(anchor, body), cam.center, cam.scale, VP);
+          expect(inside(p, { x0: 0, y0: 0, x1: VP.viewW, y1: VP.viewH })).toBe(true);
         }
       });
     }
   }
 
+});
+
+describe("encounter formation", () => {
   it("enemies stacked on one exact point still get distinct slots", () => {
     const anchor = ANCHORS.centre;
     const units: Unit[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, isBoss: i === 0, pos: { x: 1140, y: 650 } }));

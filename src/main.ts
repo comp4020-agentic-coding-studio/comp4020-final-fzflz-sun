@@ -11,53 +11,56 @@ import {
   takeFromHand,
   totalCards,
 } from "./cards.ts";
-import { VIEWPORT, VIEW_HEIGHT, VIEW_WIDTH, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
-import { clampCam, formationBounds, layoutFormation, planCamera } from "./formation.ts";
+import { BOSS_BOX, boxAt, clampCam, formationBounds, layoutFormation, planCamera, TRASH_BOX, type Rect, type Viewport } from "./formation.ts";
+import { SaveClient, type SavePayload, type SaveStatus } from "./net.ts";
+import { clearedAreas, killedCount, newRun, type CheckpointReason, type SaveData } from "./save.ts";
 import { separate } from "./separation.ts";
 import {
   type Intent,
   type Phase,
   type PhaseEvent,
   type ResolvePlan,
-  type RunState,
   canAct as canActRule,
   planResolve,
   transition,
 } from "./turn.ts";
+import {
+  AREAS,
+  ENEMY_SPAWNS,
+  PLAYER_EDGE,
+  PLAYER_MAX_HP,
+  PLAYER_START,
+  TRASH_HP,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+} from "./world.ts";
 
-// Feel-test prototype, v5. Exploration is real-time (chase, leash, light
-// separation); a fight locks the roster, eases enemies into readable slots,
-// then runs strict turns: player turn -> enemy resolve (played one action at
-// a time) -> next turn. Pure rules live in cards/formation/separation/turn.ts.
+// Exploration is real-time (chase, leash, light separation); a fight locks the
+// roster, eases enemies into readable slots, then runs strict turns: player
+// turn -> enemy resolve (one action at a time) -> next turn. The run is saved
+// on the server at stable checkpoints. HUD, hand and menus are HTML over the
+// canvas so they stay readable and tappable at any viewport size.
 
-
-const k = kaplay({
-  width: VIEW_WIDTH,
-  height: VIEW_HEIGHT,
-  letterbox: true,
-  background: [17, 17, 17],
-});
-
-k.setGravity(0);
+const DEV = import.meta.env.DEV;
+const params = new URLSearchParams(location.search);
+// ?fight= is a development-only shortcut; it never runs (or saves) in production.
+const FIGHT_PARAM = DEV ? params.get("fight") : null;
 
 // ---------- tunables ----------
 
 const PLAYER_SPEED = 220;
-const PLAYER_MAX_HP = 24;
 const PLAYER_MAX_ENERGY = 3;
 const HAND_SIZE = 4;
 
 const TRASH_AGGRO_RANGE = 210;
 const TRASH_ENGAGE_RANGE = 40;
 const TRASH_SPEED = 100;
-const TRASH_HP = 6;
 const TRASH_ATK_DAMAGE = 3;
 const TRASH_RADIUS = 14;
 
 const BOSS_AGGRO_RANGE = 260;
 const BOSS_ENGAGE_RANGE = 46;
 const BOSS_SPEED = 78;
-const BOSS_HP = 40;
 const BOSS_ATTACK_DMG = 5;
 const BOSS_BIGATTACK_DMG = 12;
 const BOSS_DEFEND_BLOCK = 8;
@@ -72,6 +75,7 @@ const BOSS_PATTERN: Intent[] = [
 const LEASH_FACTOR = 1.35;
 const JOIN_RADIUS = 260;
 const FLEE_IMMUNITY = 2.5;
+const LOAD_IMMUNITY = 2.5; // after restoring a checkpoint, a moment to get your bearings
 const END_GRACE = 0.3;
 
 // Enemy-enemy spacing only (the player is never pushed). Trash-trash minimum
@@ -83,7 +87,6 @@ const TRASH_MASS = 1;
 
 const FORM_DURATION = 0.3;
 const ENEMY_ACTION_GAP = 0.45;
-const OVERFLOW_PANEL_ROWS = 4;
 
 const CAM_LERP_RATE = 4;
 const CAM_MAX_ZOOM_SMALL = 1.5;
@@ -91,12 +94,60 @@ const CAM_MAX_ZOOM_LARGE = 1.2;
 const BOSS_DANGER_BONUS = 3;
 const DANGER_THRESHOLD = 3;
 
-const FEEDBACK_DURATION = 1.4;
+const FEEDBACK_MS = 1600;
 const HIT_FLASH_DURATION = 0.15;
 
 // Label offsets match TRASH_BOX / BOSS_BOX in formation.ts.
 const TRASH_LABELS = { hp: -24, intent: -42, marker: -60 };
 const BOSS_LABELS = { hp: -40, intent: -68, marker: -98 };
+
+// ---------- DOM ----------
+
+const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+const ui = {
+  hp: $("hp"),
+  energy: $("energy"),
+  state: $("state"),
+  turn: $("turn"),
+  piles: $("piles"),
+  progress: $("progress"),
+  feedback: $("feedback"),
+  savePill: $<HTMLButtonElement>("savePill"),
+  menuBtn: $<HTMLButtonElement>("menuBtn"),
+  topbar: $("topbar"),
+  overflow: $("overflow"),
+  overflowTitle: $("overflowTitle"),
+  overflowList: $("overflowList"),
+  dock: $("dock"),
+  hint: $("hint"),
+  hand: $("hand"),
+  endTurn: $<HTMLButtonElement>("endTurn"),
+  flee: $<HTMLButtonElement>("flee"),
+  screen: $("screen"),
+  panel: $("panel"),
+};
+
+function setText(el: HTMLElement, text: string) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+function showFeedback(msg: string) {
+  setText(ui.feedback, msg);
+  if (feedbackTimer) clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => setText(ui.feedback, ""), FEEDBACK_MS);
+}
+
+// ---------- engine ----------
+
+const k = kaplay({
+  root: $("game"),
+  background: [17, 17, 17],
+  pixelDensity: Math.min(window.devicePixelRatio || 1, 2),
+  global: false,
+  debug: DEV,
+});
+k.setGravity(0);
 
 const PLAYER_COLOR = k.rgb(80, 160, 255);
 const TRASH_COLOR = k.rgb(220, 70, 70);
@@ -105,10 +156,44 @@ const BOSS_COLOR = k.rgb(160, 60, 200);
 type Vec2 = ReturnType<typeof k.vec2>;
 type Timer = ReturnType<typeof k.wait>;
 
+// ---------- layout (viewport-driven) ----------
+
+/** Screen px per world unit while exploring: about a 960x540 world view, never wider than the map. */
+function baseScale(): number {
+  const w = k.width();
+  const h = k.height();
+  const fit = Math.min(Math.max(Math.min(w / 960, h / 540), 1), 2.2);
+  return Math.max(fit, w / WORLD_WIDTH, h / WORLD_HEIGHT);
+}
+
+/** Part of the canvas not covered by the HTML HUD, dock or side list, measured from the real DOM. */
+function measureSafe(): Rect {
+  const w = k.width();
+  const h = k.height();
+  let top = ui.topbar.getBoundingClientRect().bottom + 6;
+  let right = w - 8;
+  let bottom = h - 6;
+  if (document.body.classList.contains("fighting")) bottom = ui.dock.getBoundingClientRect().top - 6;
+  if (!ui.overflow.hidden) {
+    const o = ui.overflow.getBoundingClientRect();
+    if (w <= 640) top = Math.max(top, o.bottom + 6);
+    else right = Math.min(right, o.left - 6);
+  }
+  return { x0: 8, y0: top, x1: right, y1: Math.max(bottom, top + 60) };
+}
+
+function viewport(): Viewport {
+  return { viewW: k.width(), viewH: k.height(), worldW: WORLD_WIDTH, worldH: WORLD_HEIGHT, safe: measureSafe(), baseScale: baseScale() };
+}
+
+function placeOverflowPanel() {
+  ui.overflow.style.top = `${ui.topbar.getBoundingClientRect().bottom + 6}px`;
+}
+
 // ---------- player / run state ----------
 
 const player = k.add([
-  k.pos(220, 650),
+  k.pos(PLAYER_START.x, PLAYER_START.y),
   k.circle(16),
   k.color(PLAYER_COLOR),
   k.area(),
@@ -118,29 +203,25 @@ const player = k.add([
   { hp: PLAYER_MAX_HP, energy: PLAYER_MAX_ENERGY, block: 0 },
 ]);
 
+type RunState = "menu" | "playing" | "dead" | "won";
 let piles: Piles = newPiles();
 let selectedTarget: Enemy | null = null;
-let runState: RunState = "playing";
+let runState: RunState = "menu";
 let encounterCooldownUntil = 0;
-let feedbackMessage = "";
-let feedbackUntil = 0;
-let overflowScroll = 0;
+let run: SaveData | null = null; // the run being played: identity + stats; enemies/player live in the world
+let lastSavedAt = 0;
+let moveTarget: Vec2 | null = null;
+const held = new Set<string>();
 
-// Every delayed combat callback goes through here so an encounter ending,
-// the player dying or a restart can cancel what's still queued.
+const saveClient = new SaveClient();
+
 let pendingTimers: Timer[] = [];
 function schedule(seconds: number, fn: () => void) {
-  const t = k.wait(seconds, fn);
-  pendingTimers.push(t);
+  pendingTimers.push(k.wait(seconds, fn));
 }
 function cancelPending() {
   for (const t of pendingTimers) t.cancel();
   pendingTimers = [];
-}
-
-function showFeedback(msg: string) {
-  feedbackMessage = msg;
-  feedbackUntil = k.time() + FEEDBACK_DURATION;
 }
 
 function floatText(pos: Vec2, msg: string, color: ReturnType<typeof k.rgb>) {
@@ -178,13 +259,22 @@ for (const p of [
 ]) {
   k.add([k.circle(34), k.pos(p.x, p.y), k.color(45, 55, 45), k.z(-90)]);
 }
+// Area names on the ground, so "camps cleared" points at somewhere real.
+const AREA_LABEL_POS: Record<string, { x: number; y: number }> = {
+  west: { x: 730, y: 330 }, south: { x: 650, y: 880 }, north: { x: 1305, y: 160 }, lair: { x: 1800, y: 560 },
+};
+const areaLabels = new Map<string, { text: string }>();
+for (const a of AREAS) {
+  const p = AREA_LABEL_POS[a.id];
+  areaLabels.set(a.id, k.add([k.text(a.name, { size: 14 }), k.pos(p.x, p.y), k.anchor("center"), k.color(110, 110, 120), k.z(-80)]));
+}
 
 // ---------- enemies ----------
 
 type EnemyState = "idle" | "chasing" | "returning" | "engaged";
 let nextEnemyId = 1;
 
-function spawnEnemy(x: number, y: number, hp: number, isBoss: boolean) {
+function spawnEnemy(x: number, y: number, hp: number, maxHp: number, isBoss: boolean, spawnId: string | null) {
   const labels = isBoss ? BOSS_LABELS : TRASH_LABELS;
   const enemy = k.add([
     k.pos(x, y),
@@ -196,14 +286,15 @@ function spawnEnemy(x: number, y: number, hp: number, isBoss: boolean) {
     k.z(5),
     "enemy",
     {
-      enemyId: nextEnemyId++,
+      enemyId: nextEnemyId++, // runtime only; saves use spawnId
+      spawnId,
       hp,
-      maxHp: hp,
+      maxHp,
       block: 0,
       home: k.vec2(x, y),
       state: "idle" as EnemyState,
       isBoss,
-      bodyRadius: isBoss ? BOSS_RADIUS : TRASH_RADIUS,
+      bodyRadius: isBoss ? BOSS_RADIUS : TRASH_RADIUS, // not "radius": rect() owns that name
       mass: isBoss ? BOSS_MASS : TRASH_MASS,
       aggroRange: isBoss ? BOSS_AGGRO_RANGE : TRASH_AGGRO_RANGE,
       engageRange: isBoss ? BOSS_ENGAGE_RANGE : TRASH_ENGAGE_RANGE,
@@ -218,7 +309,7 @@ function spawnEnemy(x: number, y: number, hp: number, isBoss: boolean) {
     },
   ]);
   enemy.add([
-    k.text(String(hp), { size: isBoss ? 16 : 12 }),
+    k.text(String(hp), { size: isBoss ? 16 : 13 }),
     k.pos(0, labels.hp),
     k.anchor("center"),
     k.color(255, 255, 255),
@@ -226,7 +317,7 @@ function spawnEnemy(x: number, y: number, hp: number, isBoss: boolean) {
     "enemyHpLabel",
   ]);
   enemy.add([
-    k.text("", { size: 13, align: "center" }),
+    k.text("", { size: 14, align: "center" }),
     k.pos(0, labels.intent),
     k.anchor("center"),
     k.color(255, 210, 80),
@@ -238,22 +329,7 @@ function spawnEnemy(x: number, y: number, hp: number, isBoss: boolean) {
 }
 type Enemy = ReturnType<typeof spawnEnemy>;
 
-const ENEMY_CONFIGS: { x: number; y: number; hp: number; boss?: boolean }[] = [
-  { x: 700, y: 400, hp: TRASH_HP },
-  { x: 760, y: 440, hp: TRASH_HP },
-  { x: 650, y: 950, hp: TRASH_HP },
-  { x: 1280, y: 280, hp: TRASH_HP },
-  { x: 1330, y: 230, hp: TRASH_HP },
-  { x: 1300, y: 360, hp: TRASH_HP },
-  { x: 1750, y: 640, hp: TRASH_HP },
-  { x: 1850, y: 700, hp: BOSS_HP, boss: true },
-];
-
 let enemies: Enemy[] = [];
-
-function spawnAllEnemies() {
-  enemies = ENEMY_CONFIGS.map((c) => spawnEnemy(c.x, c.y, c.hp, c.boss ?? false));
-}
 
 function hpLabelOf(e: Enemy) {
   return e.get("enemyHpLabel")[0];
@@ -262,8 +338,10 @@ function stateLabelOf(e: Enemy) {
   return e.get("enemyStateLabel")[0];
 }
 function enemyName(e: Enemy) {
-  return e.isBoss ? "Boss" : `Grunt #${e.enemyId}`;
+  return e.isBoss ? "Boss" : `Grunt ${e.spawnId ?? e.enemyId}`;
 }
+// Never put square brackets in Kaplay text: [x] is a style tag and an
+// unmatched one throws, halting the game loop.
 function refreshHpLabel(e: Enemy) {
   const label = hpLabelOf(e);
   if (label) label.text = e.block > 0 ? `${e.hp} (blk ${e.block})` : String(e.hp);
@@ -275,7 +353,6 @@ function intentText(e: Enemy): string {
     return e.isBoss && intent.value >= BOSS_BIGATTACK_DMG ? `HEAVY ATK ${intent.value}` : `ATK ${intent.value}`;
   }
   if (intent.kind === "defend") return `DEF +${intent.value}`;
-  // patternIndex already points at the move after this charge
   const next = BOSS_PATTERN[e.patternIndex % BOSS_PATTERN.length];
   return next.kind === "attack" ? `CHARGE\nnext: ATK ${next.value}` : "CHARGE";
 }
@@ -305,12 +382,14 @@ interface Encounter {
   fleeing: boolean;
   turnNumber: number;
   phaseStartedAt: number;
+  anchor: { x: number; y: number };
 }
 let activeEncounter: Encounter | null = null;
 let nextEncounterId = 1;
 
+const playing = () => runState === "playing";
 function canAct() {
-  return canActRule(activeEncounter?.phase ?? null, runState);
+  return runState === "playing" && !screenOpen() && canActRule(activeEncounter?.phase ?? null, "playing");
 }
 
 function setPhase(enc: Encounter, ev: PhaseEvent): boolean {
@@ -322,7 +401,7 @@ function setPhase(enc: Encounter, ev: PhaseEvent): boolean {
 }
 
 function blockedReason(): string {
-  if (runState !== "playing") return "run is over - press R";
+  if (runState !== "playing") return "the run is over";
   if (!activeEncounter) return "not in a fight";
   switch (activeEncounter.phase) {
     case "forming":
@@ -352,6 +431,15 @@ function selectTarget(e: Enemy) {
   selectedTarget = e;
 }
 
+function cycleTarget(dir: number) {
+  const alive = aliveRoster();
+  if (!alive.length) return;
+  // left-to-right on screen for on-stage enemies, then the side list
+  const order = [...alive.filter((e) => !e.overflow).sort((a, b) => a.pos.x - b.pos.x), ...alive.filter((e) => e.overflow)];
+  const i = selectedTarget ? order.indexOf(selectedTarget) : -1;
+  selectedTarget = order[(i + dir + order.length) % order.length];
+}
+
 function computeDifficulty(roster: Enemy[]): "normal" | "dangerous" {
   const weight = roster.length + roster.filter((e) => e.isBoss).length * BOSS_DANGER_BONUS;
   return weight >= DANGER_THRESHOLD ? "dangerous" : "normal";
@@ -368,22 +456,72 @@ function rollIntent(e: Enemy) {
   refreshIntentLabel(e);
 }
 
+// ---------- checkpoints ----------
+
+function aliveMapEnemy(spawnId: string) {
+  return enemies.find((e) => e.spawnId === spawnId && e.exists());
+}
+
+/**
+ * The logical world state at a stable moment: player HP and position, every
+ * map enemy's HP by stable id (0 = killed). Enemy positions are not saved; on
+ * restore they stand at their home spot, so formation slots never leak into a save.
+ */
+function checkpoint(reason: CheckpointReason): SaveData | null {
+  if (!run) return null;
+  const enemiesHp = Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.hp ?? 0)]));
+  const allDead = ENEMY_SPAWNS.every((s) => enemiesHp[s.id] === 0);
+  const dead = runState === "dead";
+  lastSavedAt = Math.max(Date.now(), lastSavedAt + 1);
+  run = {
+    ...run,
+    savedAt: lastSavedAt,
+    reason,
+    outcome: dead ? "dead" : allDead ? "won" : "playing",
+    player: {
+      hp: dead ? 0 : Math.max(1, player.hp),
+      x: k.clamp(Math.round(player.pos.x), PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE),
+      y: k.clamp(Math.round(player.pos.y), PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE),
+    },
+    enemies: enemiesHp,
+    stats: { ...run.stats },
+  };
+  return run;
+}
+
+function saveCheckpoint(reason: CheckpointReason) {
+  const cp = checkpoint(reason);
+  if (cp) saveClient.save(cp);
+}
+
 // ---------- encounter flow ----------
 
 function tryTriggerEncounter(now: number) {
   const instigator = enemies.find(
-    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= e.engageRange
+    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= e.engageRange,
   );
   if (!instigator) return;
   const roster = enemies.filter(
-    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= JOIN_RADIUS
+    (e) => e.exists() && e.state === "chasing" && e.pos.dist(player.pos) <= JOIN_RADIUS,
   );
 
-  // Slots are assigned once, here, and the camera is planned from those final
-  // slots (not from where enemies happened to be standing when they caught you).
-  const units = roster.map((e) => ({ id: e.enemyId, isBoss: e.isBoss, pos: { x: e.pos.x, y: e.pos.y } }));
+  // The pre-fight checkpoint: closing the tab mid-fight comes back to here.
+  if (run) run.stats.fights++;
+  saveCheckpoint("engage");
+
+  moveTarget = null;
+  document.body.classList.add("fighting");
   const anchor = { x: player.pos.x, y: player.pos.y };
-  const formation = layoutFormation(units, anchor, VIEWPORT);
+  const units = roster.map((e) => ({ id: e.enemyId, isBoss: e.isBoss, pos: { x: e.pos.x, y: e.pos.y } }));
+  // Slots are assigned once, from the real space left between HUD and hand.
+  // If some don't fit, the side list appears and the stage is re-measured.
+  ui.overflow.hidden = true;
+  let formation = layoutFormation(units, anchor, viewport());
+  if (formation.overflow.length) {
+    ui.overflow.hidden = false;
+    placeOverflowPanel();
+    formation = layoutFormation(units, anchor, viewport());
+  }
   const overflowIds = new Set(formation.overflow);
   for (const e of roster) {
     const slot = formation.slots.get(e.enemyId);
@@ -398,28 +536,50 @@ function tryTriggerEncounter(now: number) {
     refreshHpLabel(e);
   }
 
-  const difficulty = computeDifficulty(roster);
-  const bounds = formationBounds(units, formation.slots, anchor);
-  const zoom =
-    difficulty === "dangerous"
-      ? { min: 1, max: roster.length >= 3 ? CAM_MAX_ZOOM_LARGE : CAM_MAX_ZOOM_SMALL }
-      : { min: 1, max: 1 };
-  const cam = planCamera(bounds, VIEWPORT, zoom);
-
   activeEncounter = {
     id: nextEncounterId++,
     roster,
-    difficulty,
-    camPos: k.vec2(cam.center.x, cam.center.y),
-    camScale: cam.scale,
+    difficulty: computeDifficulty(roster),
+    camPos: k.vec2(player.pos.x, player.pos.y),
+    camScale: baseScale(),
     phase: "forming",
     fleeing: false,
     turnNumber: 1,
     phaseStartedAt: now,
+    anchor,
   };
+  replanCamera(activeEncounter, true);
   player.block = 0;
   selectedTarget = roster.find((e) => e.isBoss && !e.overflow) ?? roster.find((e) => !e.overflow) ?? roster[0];
   renderHand();
+}
+
+/** Frames the fight inside the current safe area; re-run on resize. Uses final slots, not pre-fight positions. */
+function replanCamera(enc: Encounter, useSlots: boolean) {
+  const base = baseScale();
+  const shown = enc.roster.filter((e) => e.exists() && !e.overflow);
+  const units = shown.map((e) => {
+    const p = useSlots && e.formTo ? e.formTo : e.pos;
+    return { id: e.enemyId, isBoss: e.isBoss, pos: { x: p.x, y: p.y } };
+  });
+  const slots = new Map(units.map((u) => [u.id, u.pos]));
+  const bounds = formationBounds(units, slots, enc.anchor);
+  const core = units.length ? enemyBounds(units, slots) : bounds;
+  const max = enc.difficulty === "dangerous" ? base * (enc.roster.length >= 3 ? CAM_MAX_ZOOM_LARGE : CAM_MAX_ZOOM_SMALL) : base;
+  // min below base: only used if the window got too small to show the fight at exploration zoom
+  const cam = planCamera(bounds, viewport(), { min: base * 0.5, max }, core);
+  enc.camPos = k.vec2(cam.center.x, cam.center.y);
+  enc.camScale = cam.scale;
+}
+
+function enemyBounds(units: { id: number; isBoss: boolean }[], slots: Map<number, { x: number; y: number }>): Rect {
+  const rects = units.map((u) => boxAt(slots.get(u.id)!, u.isBoss ? BOSS_BOX : TRASH_BOX));
+  return {
+    x0: Math.min(...rects.map((r) => r.x0)),
+    y0: Math.min(...rects.map((r) => r.y0)),
+    x1: Math.max(...rects.map((r) => r.x1)),
+    y1: Math.max(...rects.map((r) => r.y1)),
+  };
 }
 
 function finishForming(enc: Encounter) {
@@ -450,9 +610,7 @@ function endPlayerTurn(fleeing: boolean) {
   enc.fleeing = fleeing;
   discardHand(piles);
   renderHand();
-
-  // An enemy's DEF block covered the player turn that just ended; it expires
-  // now, before this round of actions (a fresh DEF re-applies below).
+  // An enemy's DEF block covered the player turn that just ended; it expires now.
   for (const e of enc.roster) {
     if (!e.exists()) continue;
     e.block = 0;
@@ -460,7 +618,7 @@ function endPlayerTurn(fleeing: boolean) {
   }
   const plan = planResolve(
     { hp: player.hp, block: player.block },
-    enc.roster.map((e) => ({ id: e.enemyId, alive: e.exists(), intent: e.intent }))
+    enc.roster.map((e) => ({ id: e.enemyId, alive: e.exists(), intent: e.intent })),
   );
   showFeedback(fleeing ? "Fleeing - enemies act first..." : "Enemy turn");
   playResolve(enc, plan, 0);
@@ -492,9 +650,7 @@ function playResolve(enc: Encounter, plan: ResolvePlan, i: number) {
       const absorbed = ev.intent.value - ev.damageTaken;
       floatText(player.pos.add(0, -28), ev.damageTaken > 0 ? `-${ev.damageTaken}` : "blocked", k.rgb(255, 110, 110));
       k.shake(ev.intent.value >= BOSS_BIGATTACK_DMG ? 7 : 2);
-      showFeedback(
-        `${enemyName(e)} hits for ${ev.intent.value}` + (absorbed > 0 ? ` (${absorbed} blocked)` : "")
-      );
+      showFeedback(`${enemyName(e)} hits for ${ev.intent.value}` + (absorbed > 0 ? ` (${absorbed} blocked)` : ""));
     }
     refreshIntentLabel(e);
   }
@@ -534,12 +690,19 @@ function finishUnforming(enc: Encounter) {
   }
   encounterCooldownUntil = k.time() + FLEE_IMMUNITY;
   cleanupEncounter();
+  if (run) run.stats.flees++;
+  saveCheckpoint("flee");
 }
 
 function finishVictory() {
   encounterCooldownUntil = k.time() + END_GRACE;
-  showFeedback("Victory");
   cleanupEncounter();
+  if (run) run.stats.wins++;
+  const cleared = !enemies.some((e) => e.exists());
+  if (cleared) runState = "won";
+  saveCheckpoint("victory");
+  if (cleared) showEndScreen();
+  else showFeedback("Victory");
 }
 
 function finishDeath() {
@@ -547,7 +710,11 @@ function finishDeath() {
   endEncounterPiles(piles);
   runState = "dead";
   activeEncounter = null;
+  document.body.classList.remove("fighting");
+  ui.overflow.hidden = true;
   renderHand();
+  saveCheckpoint("death");
+  showEndScreen();
 }
 
 function cleanupEncounter() {
@@ -556,7 +723,8 @@ function cleanupEncounter() {
   player.block = 0;
   selectedTarget = null;
   activeEncounter = null;
-  overflowScroll = 0;
+  document.body.classList.remove("fighting");
+  ui.overflow.hidden = true;
   for (const e of enemies) {
     if (!e.exists()) continue;
     e.overflow = false;
@@ -599,7 +767,9 @@ function damageEnemy(enemy: Enemy, amount: number) {
   flash(enemy, enemy.isBoss ? BOSS_COLOR : TRASH_COLOR);
   floatText(enemy.pos.add(0, -10), dealt > 0 ? `-${dealt}` : "blocked", k.rgb(255, 240, 160));
   if (enemy.hp <= 0) {
+    enemy.hp = 0;
     k.destroy(enemy);
+    if (run && enemy.spawnId) run.stats.kills++;
     return;
   }
   refreshHpLabel(enemy);
@@ -650,286 +820,589 @@ function applyCard(card: CardDef, target: Enemy | undefined, alive: Enemy[]) {
   }
 }
 
-function requestEndTurn() {
-  endPlayerTurn(false);
-}
-function flee() {
-  endPlayerTurn(true);
-}
+const requestEndTurn = () => endPlayerTurn(false);
+const flee = () => endPlayerTurn(true);
 
-// ---------- HUD ----------
-// Never put square brackets in displayed text: Kaplay parses [x] as a style
-// tag and an unmatched one throws, halting the whole game loop.
+// ---------- HUD (HTML) ----------
 
-const hud = {
-  hp: k.add([k.text("", { size: 18 }), k.pos(16, 12), k.fixed(), k.z(100)]),
-  energy: k.add([k.text("", { size: 18 }), k.pos(16, 34), k.fixed(), k.z(100)]),
-  state: k.add([k.text("", { size: 16 }), k.pos(16, 56), k.fixed(), k.z(100), k.color(255, 210, 80)]),
-  turn: k.add([k.text("", { size: 14 }), k.pos(16, 78), k.fixed(), k.z(100), k.color(160, 200, 255)]),
-  piles: k.add([k.text("", { size: 13 }), k.pos(16, 98), k.fixed(), k.z(100), k.color(150, 150, 150)]),
-  feedback: k.add([k.text("", { size: 14 }), k.pos(16, 118), k.fixed(), k.z(100), k.color(255, 160, 140)]),
-  hint: k.add([
-    k.text(
-      "Click enemy (or side list) to target · 1-4 / click card to play · WASD move\n" +
-        "Block lasts through the enemy turn, then clears. Flee = enemies act first.",
-      { size: 12, width: 760 }
-    ),
-    k.pos(16, 404),
-    k.fixed(),
-    k.z(100),
-    k.color(170, 170, 170),
-  ]),
-  status: k.add([k.text("", { size: 22 }), k.pos(VIEW_WIDTH / 2, 40), k.anchor("center"), k.fixed(), k.z(100)]),
-};
-
-function makeButton(label: string, y: number, onPress: () => void) {
-  const btn = k.add([
-    k.rect(140, 40, { radius: 6 }),
-    k.pos(VIEW_WIDTH - 86, y),
-    k.anchor("center"),
-    k.fixed(),
-    k.z(100),
-    k.area(),
-    k.color(50, 50, 50),
-    k.opacity(1),
-    k.outline(2, k.rgb(200, 200, 200)),
-  ]);
-  btn.add([k.text(label, { size: 12, align: "center" }), k.anchor("center"), k.color(230, 230, 230)]);
-  btn.onClick(onPress);
-  return btn;
-}
-const endTurnButton = makeButton("End Turn (Space)", VIEW_HEIGHT - 128, requestEndTurn);
-const fleeButton = makeButton("Flee (F)\nenemies act first", VIEW_HEIGHT - 80, flee);
-
-const targetMarker = k.add([
-  k.text("▼", { size: 16 }),
-  k.pos(0, 0),
-  k.anchor("center"),
-  k.color(255, 255, 80),
-  k.opacity(0),
-  k.z(20),
-]);
-
-// Fallback list for participants that don't fit the stage: still selectable,
-// still damaged by Cleave, still act in the resolve.
-const overflowPanel = k.add([
-  k.rect(240, 24 + OVERFLOW_PANEL_ROWS * 24, { radius: 6 }),
-  k.pos(VIEW_WIDTH - 16, 12),
-  k.anchor("topright"),
-  k.fixed(),
-  k.z(100),
-  k.color(30, 30, 30),
-  k.outline(2, k.rgb(90, 90, 90)),
-  k.opacity(0),
-]);
-const overflowTitle = k.add([
-  k.text("", { size: 11 }),
-  k.pos(VIEW_WIDTH - 248, 18),
-  k.fixed(),
-  k.z(101),
-  k.color(200, 200, 200),
-  k.opacity(0),
-]);
-function makeScrollButton(glyph: string, x: number, delta: number) {
-  const b = k.add([
-    k.text(glyph, { size: 14 }),
-    k.pos(x, 16),
-    k.fixed(),
-    k.z(101),
-    k.area(),
-    k.color(220, 220, 220),
-    k.opacity(0),
-  ]);
-  b.onClick(() => {
-    overflowScroll += delta;
-  });
-  return b;
-}
-const overflowUp = makeScrollButton("▲", VIEW_WIDTH - 60, -1);
-const overflowDown = makeScrollButton("▼", VIEW_WIDTH - 40, 1);
-const overflowRows = Array.from({ length: OVERFLOW_PANEL_ROWS }, (_, r) => {
-  const bg = k.add([
-    k.rect(224, 20, { radius: 4 }),
-    k.pos(VIEW_WIDTH - 24, 38 + r * 24),
-    k.anchor("topright"),
-    k.fixed(),
-    k.z(100),
-    k.area(),
-    k.color(45, 45, 45),
-    k.opacity(0),
-  ]);
-  const label = k.add([
-    k.text("", { size: 11 }),
-    k.pos(VIEW_WIDTH - 244, 42 + r * 24),
-    k.fixed(),
-    k.z(101),
-    k.color(230, 230, 230),
-    k.opacity(0),
-  ]);
-  bg.onClick(() => {
-    const target = overflowList()[overflowScroll + r];
-    if (target) selectTarget(target);
-  });
-  return { bg, label };
-});
-
-let cardSlots: ReturnType<typeof k.add>[] = [];
+let handSignature = "";
 function renderHand() {
-  for (const slot of cardSlots) k.destroy(slot);
-  cardSlots = [];
-  const slotW = 150;
-  const startX = VIEW_WIDTH / 2 - (HAND_SIZE * slotW) / 2 - 60;
   const playable = canAct();
-  for (let i = 0; i < HAND_SIZE; i++) {
-    const card = piles.hand[i];
-    const affordable = !!card && playable && player.energy >= card.cost;
-    const box = k.add([
-      k.rect(slotW - 12, 76, { radius: 6 }),
-      k.pos(startX + i * slotW + slotW / 2, VIEW_HEIGHT - 46),
-      k.anchor("center"),
-      k.fixed(),
-      k.z(100),
-      k.area(),
-      k.color(card ? (affordable ? 55 : 38) : 25, card ? (affordable ? 70 : 38) : 25, card ? (affordable ? 95 : 38) : 25),
-      k.outline(2, card ? (affordable ? k.rgb(220, 220, 220) : k.rgb(110, 110, 110)) : k.rgb(60, 60, 60)),
-    ]);
-    if (card) {
-      box.onClick(() => playCardAt(i));
-      box.add([
-        k.text(`${i + 1}. ${card.name}  (${card.cost}E)`, { size: 12 }),
-        k.pos(0, -24),
-        k.anchor("center"),
-        k.color(240, 240, 240),
-      ]);
-      box.add([
-        k.text(card.blurb, { size: 10, width: slotW - 24, align: "center" }),
-        k.pos(0, 8),
-        k.anchor("center"),
-        k.color(affordable ? 200 : 130, affordable ? 200 : 130, affordable ? 200 : 130),
-      ]);
-    }
-    cardSlots.push(box);
+  const sig = JSON.stringify([piles.hand.map((c) => c.name), player.energy, playable]);
+  if (sig === handSignature) return;
+  handSignature = sig;
+  ui.hand.replaceChildren(
+    ...Array.from({ length: HAND_SIZE }, (_, i) => {
+      const card = piles.hand[i];
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "card";
+      if (!card) {
+        b.classList.add("empty");
+        b.tabIndex = -1;
+        return b;
+      }
+      const affordable = playable && player.energy >= card.cost;
+      if (!affordable) {
+        b.classList.add("cant");
+        b.setAttribute("aria-disabled", "true");
+      }
+      b.innerHTML = `<span class="name"></span><span class="cost"></span><span class="blurb"></span>`;
+      (b.children[0] as HTMLElement).textContent = `${i + 1}. ${card.name}`;
+      (b.children[1] as HTMLElement).textContent = `${card.cost} energy`;
+      (b.children[2] as HTMLElement).textContent = card.blurb;
+      b.setAttribute("aria-label", `${card.name}, costs ${card.cost} energy: ${card.blurb}. Key ${i + 1}`);
+      b.addEventListener("click", () => playCardAt(i));
+      return b;
+    }),
+  );
+}
+
+let overflowSignature = "";
+function renderOverflow() {
+  const list = overflowList();
+  const show = list.length > 0 && !!activeEncounter && activeEncounter.phase !== "unforming";
+  if (ui.overflow.hidden === show) ui.overflow.hidden = !show;
+  if (!show) return;
+  const sig = JSON.stringify(list.map((e) => [e.enemyId, e.hp, e.block, intentText(e), e === selectedTarget]));
+  if (sig === overflowSignature) return;
+  overflowSignature = sig;
+  setText(ui.overflowTitle, `+${list.length} more in this fight (not on screen)`);
+  ui.overflowList.replaceChildren(
+    ...list.map((e) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = `${enemyName(e)} · ${e.hp} HP${e.block ? ` (blk ${e.block})` : ""} · ${intentText(e).replace("\n", " ")}`;
+      b.setAttribute("aria-pressed", String(e === selectedTarget));
+      b.addEventListener("click", () => selectTarget(e));
+      return b;
+    }),
+  );
+}
+
+/** Live view of what the next checkpoint would hold (for HUD counts), without saving. */
+function checkpointPreview(): SaveData {
+  const base = run ?? newRun("run_preview00", 1, 0);
+  return { ...base, enemies: Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.hp ?? 0)])) };
+}
+
+function renderHud() {
+  setText(ui.hp, `HP ${player.hp}/${PLAYER_MAX_HP}${player.block > 0 ? ` (block ${player.block})` : ""}`);
+  setText(ui.energy, `Energy ${player.energy}/${PLAYER_MAX_ENERGY}`);
+  const cur = activeEncounter;
+  setText(
+    ui.state,
+    cur
+      ? `${cur.difficulty === "dangerous" ? "DANGEROUS fight" : "Fight"}: ${aliveRoster().length} foe(s) alive`
+      : runState === "playing"
+        ? "Exploring"
+        : runState === "dead"
+          ? "Fallen"
+          : runState === "won"
+            ? "All camps cleared"
+            : "",
+  );
+  if (cur) {
+    const phaseLabel: Record<Phase, string> = {
+      forming: "enemies forming up",
+      playerTurn: "YOUR TURN",
+      resolving: cur.fleeing ? "fleeing: enemies act first" : "ENEMY TURN",
+      unforming: "escaped, enemies falling back",
+    };
+    const inc = aliveRoster().reduce((s, e) => s + (e.intent?.kind === "attack" ? e.intent.value : 0), 0);
+    setText(
+      ui.turn,
+      `Turn ${cur.turnNumber} · ${phaseLabel[cur.phase]}` +
+        (cur.phase === "playerTurn" ? ` · incoming ${inc} (${Math.max(0, inc - player.block)} after block)` : ""),
+    );
+    setText(ui.piles, `draw ${piles.draw.length} · discard ${piles.discard.length} · exhausted ${piles.exhaust.length}`);
+  } else {
+    setText(ui.turn, "");
+    setText(ui.piles, "");
+  }
+  if (run) {
+    const cleared = clearedAreas(checkpointPreview()).length;
+    setText(ui.progress, `Run #${run.runNumber} · camps cleared ${cleared}/${AREAS.length} · kills ${run.stats.kills}`);
+  } else setText(ui.progress, "");
+  const actable = canAct();
+  ui.endTurn.disabled = !actable;
+  ui.flee.disabled = !actable;
+  setText(
+    ui.hint,
+    runState === "playing" && !cur
+      ? "Move: WASD / arrow keys, or tap and hold on the map. Lure enemies; everyone chasing you joins the fight."
+      : "",
+  );
+}
+
+function renderSaveStatus(s: SaveStatus) {
+  const pill = ui.savePill;
+  const time = (t: number) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const set = (text: string, cls: string, title: string) => {
+    setText(pill, text);
+    pill.className = cls;
+    pill.title = title;
+  };
+  switch (s.kind) {
+    case "idle":
+      return set("Not saved yet", "", "Your run saves on the server when a fight starts, and after you win, flee or fall.");
+    case "saving":
+      return set("Saving…", "busy", "Sending this checkpoint to the server");
+    case "saved":
+      return set(`Saved ✓ ${time(s.at)}`, "ok", "The server confirmed this checkpoint");
+    case "retrying":
+      return set(`Save failed - retrying (${s.attempt}/5)…`, "busy bad", s.error);
+    case "failed":
+      return set(s.retryable ? "Not saved - tap to retry" : "Save rejected", "bad", s.error);
+    case "conflict":
+      return set("Out of date - reload", "bad", s.error);
+    case "off":
+      return set(s.why, "bad", s.why);
   }
 }
 
-// ---------- input ----------
+// ---------- screens (HTML modal) ----------
 
-for (let i = 0; i < HAND_SIZE; i++) {
-  k.onKeyPress(String(i + 1), () => playCardAt(i));
+let screenCloseable = false;
+const screenOpen = () => !ui.screen.hidden;
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 }
-k.onKeyPress("space", requestEndTurn);
-k.onKeyPress("f", flee);
-k.onKeyPress("escape", flee);
-k.onKeyPress("r", () => {
-  if (runState !== "playing") resetGame();
+
+function showScreen(html: string, handlers: Record<string, () => void> = {}, closeable = false) {
+  ui.panel.innerHTML = html;
+  for (const [id, fn] of Object.entries(handlers)) {
+    ui.panel.querySelector<HTMLElement>(`#${id}`)?.addEventListener("click", fn);
+  }
+  ui.screen.hidden = false;
+  screenCloseable = closeable;
+  held.clear();
+  moveTarget = null;
+  (ui.panel.querySelector<HTMLElement>(".primary") ?? ui.panel.querySelector<HTMLElement>("button"))?.focus();
+}
+
+function hideScreen() {
+  ui.screen.hidden = true;
+  screenCloseable = false;
+  renderHand();
+}
+
+const HOW_TO = `
+<h2>How to play</h2>
+<ul>
+  <li><b>Goal:</b> clear the four enemy camps. Walk near enemies to draw them out; everyone chasing you when one reaches you joins that fight, so you choose how many you take on.</li>
+  <li><b>Move:</b> WASD or arrow keys, or tap and hold on the map.</li>
+  <li><b>Fight:</b> each turn you get 3 energy and 4 cards. Tap an enemy (or ←/→) to target, tap a card (or 1-4) to play it. Each enemy shows what it will do; nothing happens until you <b>End turn</b> (Space).</li>
+  <li><b>Block</b> soaks damage during the enemy turn, then clears. <b>Flee</b> (F): enemies still take their shown actions, then you escape if you survive.</li>
+  <li><b>Saving:</b> your run is saved on the server when a fight starts and after you win, flee or fall. Closing mid-fight brings you back to the moment that fight started.</li>
+</ul>`;
+
+function relTime(t: number) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(t).toLocaleDateString();
+}
+
+const REASON_TEXT: Record<CheckpointReason, string> = {
+  start: "at the start of the run",
+  engage: "as a fight began",
+  victory: "after a victory",
+  flee: "after escaping a fight",
+  death: "when you fell",
+};
+
+function summaryHtml(s: SaveData) {
+  const cleared = clearedAreas(s);
+  const names = AREAS.filter((a) => cleared.includes(a.id)).map((a) => a.name);
+  return `<div class="summary">
+    <b>Run #${s.runNumber}</b> · ${s.outcome === "playing" ? `HP ${s.player.hp}/${PLAYER_MAX_HP}` : s.outcome === "dead" ? "fallen" : "all camps cleared"}<br>
+    Camps cleared: ${cleared.length}/${AREAS.length}${names.length ? ` (${escapeHtml(names.join(", "))})` : ""} · kills ${killedCount(s)} · fights won ${s.stats.wins} · fled ${s.stats.flees}<br>
+    <span class="note">Saved ${relTime(s.savedAt)}, ${REASON_TEXT[s.reason]}.</span>
+  </div>`;
+}
+
+function historyHtml(p: SavePayload) {
+  if (!p.runs.length) return "";
+  const rows = p.runs
+    .map((r) => `<tr><td>#${r.runNumber}</td><td>${escapeHtml(r.outcome)}</td><td>${r.kills} kills</td><td>${new Date(r.endedAt).toLocaleDateString()}</td></tr>`)
+    .join("");
+  return `<h2>Earlier runs</h2><table><tbody>${rows}</tbody></table>`;
+}
+
+let lastPayload: SavePayload | null = null;
+
+function showStartScreen(p: SavePayload) {
+  lastPayload = p;
+  const s = p.save;
+  if (!s) {
+    return showScreen(
+      `<h1 id="panelTitle">Camp Clearer</h1>
+       <p>A short card-battle trek. Choose which enemies to pull into each fight, read what they're about to do, and play your hand. Your progress is kept on the server for this browser, no account needed.</p>
+       ${HOW_TO}
+       <div class="buttons"><button class="primary" id="go">Start a run</button><a href="/readme/" target="_blank" rel="noopener">What makes this good? (README)</a></div>`,
+      { go: () => void beginNewRun() },
+    );
+  }
+  if (s.outcome === "playing") {
+    return showScreen(
+      `<h1 id="panelTitle">Welcome back</h1>
+       <p>Your saved progress was found on the server:</p>
+       ${summaryHtml(s)}
+       <div class="buttons"><button class="primary" id="go">Continue run #${s.runNumber}</button><button id="new">New run…</button></div>
+       ${HOW_TO}${historyHtml(p)}
+       <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
+      { go: () => startFromSave(s, true), new: () => confirmNewRun(p), erase: () => confirmErase(p) },
+    );
+  }
+  showScreen(
+    `<h1 id="panelTitle">${s.outcome === "won" ? "Run complete" : "Your last run ended"}</h1>
+     ${summaryHtml(s)}
+     <p>That run is kept in your history. Starting a new one doesn't delete anything.</p>
+     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button></div>
+     ${HOW_TO}${historyHtml(p)}
+     <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
+    { go: () => void beginNewRun(), erase: () => confirmErase(p) },
+  );
+}
+
+function confirmNewRun(p: SavePayload) {
+  const s = run ?? p.save;
+  showScreen(
+    `<h1 id="panelTitle">Start a new run?</h1>
+     ${s && s.outcome === "playing" ? `<p>Run #${s.runNumber} will be recorded in your history as <b>abandoned</b>. Its last saved checkpoint is kept; nothing is deleted.</p>` : ""}
+     <div class="buttons"><button class="primary" id="yes">Start new run</button><button id="no">Cancel</button></div>`,
+    { yes: () => void beginNewRun(), no: () => (runState === "menu" ? showStartScreen(p) : hideScreen()) },
+  );
+}
+
+function confirmErase(p: SavePayload) {
+  showScreen(
+    `<h1 id="panelTitle">Erase saved data</h1>
+     <p>This deletes your current run <b>and</b> your run history from the server for this browser. It can't be undone.</p>
+     <p><label>Type <b>ERASE</b> to confirm: <input id="eraseWord" autocomplete="off"></label></p>
+     <div class="buttons"><button class="danger" id="yes">Erase everything</button><button class="primary" id="no">Keep my data</button></div>`,
+    {
+      yes: async () => {
+        const word = ui.panel.querySelector<HTMLInputElement>("#eraseWord")?.value.trim();
+        if (word !== "ERASE") return showFeedbackInPanel("Type ERASE exactly to confirm.");
+        try {
+          const fresh = await saveClient.erase();
+          resetToMenu();
+          showStartScreen(fresh);
+        } catch (e) {
+          showFeedbackInPanel(`Couldn't erase: ${(e as Error).message}`);
+        }
+      },
+      no: () => (runState === "menu" ? showStartScreen(p) : hideScreen()),
+    },
+  );
+}
+
+function showFeedbackInPanel(msg: string) {
+  let el = ui.panel.querySelector<HTMLElement>(".panelMsg");
+  if (!el) {
+    el = document.createElement("p");
+    el.className = "panelMsg";
+    el.setAttribute("role", "alert");
+    el.style.color = "var(--bad)";
+    ui.panel.append(el);
+  }
+  el.textContent = msg;
+}
+
+function showLoadError(err: unknown) {
+  showScreen(
+    `<h1 id="panelTitle">Can't reach the server</h1>
+     <p>Your saved progress couldn't be loaded (${escapeHtml(err instanceof Error ? err.message : "network error")}). Starting now would not use your save.</p>
+     <div class="buttons"><button class="primary" id="retry">Try again</button><button id="offline">Play without saving</button></div>`,
+    {
+      retry: () => void boot(),
+      offline: () => {
+        saveClient.disable("Not saving (offline)");
+        startFromSave(newRun("run_offline00", 1, Date.now()), false);
+      },
+    },
+  );
+}
+
+function showConflictScreen(msg: string) {
+  showScreen(
+    `<h1 id="panelTitle">Progress changed elsewhere</h1>
+     <p>${escapeHtml(msg)}. To avoid overwriting it, this tab stopped saving.</p>
+     <div class="buttons"><button class="primary" id="reload">Reload with the latest save</button></div>`,
+    { reload: () => location.reload() },
+  );
+}
+
+function openMenu() {
+  if (runState === "menu" || screenOpen()) return;
+  const status = saveClient.status;
+  const saveLine =
+    status.kind === "saved"
+      ? "Your last checkpoint is saved on the server."
+      : status.kind === "off"
+        ? "Progress is not being saved in this session."
+        : "Saving: see the status at the top right.";
+  const p = lastPayload ?? { revision: 0, save: null, runs: [] };
+  showScreen(
+    `<h1 id="panelTitle">Menu</h1>
+     ${run ? summaryHtml(checkpointPreview()) : ""}
+     <p class="note">${saveLine} ${activeEncounter ? "This fight isn't saved until it ends; closing now returns you to when it started." : ""}</p>
+     <div class="buttons"><button class="primary" id="resume">Resume</button><button id="new">New run…</button><a href="/readme/" target="_blank" rel="noopener">README</a></div>
+     ${HOW_TO}
+     <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
+    { resume: hideScreen, new: () => confirmNewRun(p), erase: () => confirmErase(p) },
+    true,
+  );
+}
+
+function showEndScreen() {
+  const s = run;
+  if (!s) return;
+  const won = runState === "won";
+  showScreen(
+    `<h1 id="panelTitle">${won ? "All camps cleared!" : "You fell"}</h1>
+     ${summaryHtml(checkpointPreview())}
+     <p id="endSave" class="note">Saving this result…</p>
+     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button><a href="/readme/" target="_blank" rel="noopener">README</a></div>
+     <p class="note">Key: R starts a new run. Your finished run stays in your history.</p>`,
+    { go: () => void beginNewRun() },
+  );
+  updateEndSaveLine();
+}
+
+function updateEndSaveLine() {
+  const el = ui.panel.querySelector<HTMLElement>("#endSave");
+  if (!el) return;
+  const s = saveClient.status;
+  el.textContent =
+    s.kind === "saved"
+      ? "Result saved on the server."
+      : s.kind === "off"
+        ? "Not saved (saving is off in this session)."
+        : s.kind === "failed" || s.kind === "conflict"
+          ? `Result NOT saved: ${s.error}`
+          : "Saving this result…";
+}
+
+saveClient.onStatus((s) => {
+  renderSaveStatus(s);
+  updateEndSaveLine();
+  if (s.kind === "conflict") showConflictScreen(s.error);
 });
+renderSaveStatus(saveClient.status);
+ui.savePill.addEventListener("click", () => {
+  if (saveClient.status.kind === "failed" && saveClient.status.retryable) saveClient.retryNow();
+  else if (saveClient.status.kind === "conflict") location.reload();
+});
+ui.endTurn.addEventListener("click", requestEndTurn);
+ui.flee.addEventListener("click", flee);
+ui.menuBtn.addEventListener("click", () => openMenu());
 
-// ---------- reset ----------
+// ---------- run lifecycle ----------
 
-function resetGame() {
+async function beginNewRun() {
+  if (!saveClient.enabled) {
+    startFromSave(newRun(`run_offline${Date.now()}`, (run?.runNumber ?? 0) + 1, Date.now()), false);
+    return;
+  }
+  showScreen(`<h1 id="panelTitle">Starting a run…</h1><p>Asking the server for a fresh run.</p>`);
+  try {
+    const p = await saveClient.startRun();
+    lastPayload = p;
+    if (p.save) startFromSave(p.save, false);
+  } catch (e) {
+    if ((e as { status?: number }).status === 409) return showConflictScreen((e as Error).message);
+    showScreen(
+      `<h1 id="panelTitle">Couldn't start a run</h1><p>${escapeHtml((e as Error).message)}. Nothing was changed.</p>
+       <div class="buttons"><button class="primary" id="retry">Try again</button></div>`,
+      { retry: () => void beginNewRun() },
+    );
+  }
+}
+
+function clearWorld() {
   cancelPending();
   for (const e of k.get("enemy")) k.destroy(e);
-  spawnAllEnemies();
-  player.pos = k.vec2(220, 650);
-  player.hp = PLAYER_MAX_HP;
+  enemies = [];
+  activeEncounter = null;
+  selectedTarget = null;
+  moveTarget = null;
+  document.body.classList.remove("fighting");
+  ui.overflow.hidden = true;
+}
+
+function resetToMenu() {
+  clearWorld();
+  run = null;
+  runState = "menu";
+}
+
+/** Rebuilds the world from a checkpoint: enemies at home with their saved HP; killed ones stay gone. */
+function startFromSave(save: SaveData, restored: boolean) {
+  clearWorld();
+  run = JSON.parse(JSON.stringify(save)) as SaveData;
+  lastSavedAt = save.savedAt;
+  for (const s of ENEMY_SPAWNS) {
+    const hp = save.enemies[s.id] ?? s.maxHp;
+    if (hp > 0) enemies.push(spawnEnemy(s.x, s.y, hp, s.maxHp, s.boss, s.id));
+  }
+  player.pos = k.vec2(save.player.x, save.player.y);
+  player.hp = save.player.hp;
   player.energy = PLAYER_MAX_ENERGY;
   player.block = 0;
   player.color = PLAYER_COLOR;
   piles = newPiles();
-  selectedTarget = null;
-  activeEncounter = null;
-  encounterCooldownUntil = 0;
-  feedbackMessage = "";
-  overflowScroll = 0;
-  runState = "playing";
-  renderHand();
+  encounterCooldownUntil = k.time() + LOAD_IMMUNITY;
+  runState = save.outcome === "playing" ? "playing" : save.outcome;
+  k.setCamScale(baseScale(), baseScale());
+  k.setCamPos(player.pos);
+  hideScreen();
+  if (restored) showFeedback(`Restored run #${save.runNumber} from ${relTime(save.savedAt)} (${REASON_TEXT[save.reason]})`);
 }
 
-// Playtest shortcut: ?fight=GRUNTS,BOSS,X,Y puts the player at (X,Y) with that
-// many grunts (plus the boss if BOSS=1) stacked on one point beside them.
-function applyFightParam() {
-  const raw = new URLSearchParams(location.search).get("fight");
-  if (!raw) return;
+// ---------- input ----------
+
+const MOVE_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d"]);
+document.addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase();
+  if (screenOpen()) {
+    if (key === "escape" && screenCloseable) hideScreen();
+    return;
+  }
+  if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey || e.altKey) return;
+  const fighting = !!activeEncounter;
+  if (MOVE_KEYS.has(key)) {
+    e.preventDefault();
+    if (fighting && (key === "arrowleft" || key === "arrowright")) {
+      if (!e.repeat) cycleTarget(key === "arrowleft" ? -1 : 1);
+      return;
+    }
+    held.add(key);
+    moveTarget = null;
+    return;
+  }
+  if (e.repeat) return;
+  if (/^[1-9]$/.test(key)) playCardAt(Number(key) - 1);
+  else if (key === " ") {
+    e.preventDefault(); // Space ends the turn, never "clicks" whichever button has focus
+    requestEndTurn();
+  } else if (key === "f") flee();
+  else if (key === "q" || key === "e") cycleTarget(key === "q" ? -1 : 1);
+  else if (key === "escape") openMenu();
+  else if (key === "r" && (runState === "dead" || runState === "won")) void beginNewRun();
+});
+document.addEventListener("keyup", (e) => held.delete(e.key.toLowerCase()));
+window.addEventListener("blur", () => held.clear());
+
+// Tap / click and hold on the map to walk there (the HTML HUD sits above the
+// canvas, so taps on buttons never reach this).
+k.onMousePress(() => {
+  if (!playing() || activeEncounter || screenOpen()) return;
+  moveTarget = k.toWorld(k.mousePos());
+});
+
+window.addEventListener("beforeunload", (e) => {
+  if (saveClient.unsaved) e.preventDefault();
+});
+
+// Re-frame a fight whenever the space it was framed for changes: a window
+// resize, or the HTML HUD / dock / side list changing size.
+function onLayoutChange() {
+  placeOverflowPanel();
+  if (activeEncounter && activeEncounter.phase !== "unforming") replanCamera(activeEncounter, activeEncounter.phase === "forming");
+}
+k.onResize(onLayoutChange);
+const layoutObserver = new ResizeObserver(onLayoutChange);
+for (const el of [ui.topbar, ui.dock, ui.overflow]) layoutObserver.observe(el);
+
+// ---------- dev-only test fights ----------
+
+// ?fight=GRUNTS,BOSS,X,Y puts the player at (X,Y) with that many grunts (plus
+// the boss if BOSS=1) stacked on one point beside them. Development builds
+// only, and saving is switched off so a test never writes a real save.
+function applyFightParam(raw: string) {
   const [grunts = 3, withBoss = 0, x = 1100, y = 650] = raw.split(",").map(Number);
-  player.pos = k.vec2(k.clamp(x, 16, WORLD_WIDTH - 16), k.clamp(y, 16, WORLD_HEIGHT - 16));
+  player.pos = k.vec2(k.clamp(x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE), k.clamp(y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE));
   const side = player.pos.x > WORLD_WIDTH / 2 ? -1 : 1;
   const spot = k.vec2(k.clamp(player.pos.x + side * 30, 30, WORLD_WIDTH - 30), player.pos.y);
-  // Asking for more grunts than the map has spawns extras, to stress the
-  // overflow list.
   for (let n = enemies.filter((e) => !e.isBoss).length; n < grunts; n++) {
-    enemies.push(spawnEnemy(spot.x, spot.y, TRASH_HP, false));
+    enemies.push(spawnEnemy(spot.x, spot.y, TRASH_HP, TRASH_HP, false, null));
   }
-  const picked = [
-    ...enemies.filter((e) => !e.isBoss).slice(0, grunts),
-    ...(withBoss ? enemies.filter((e) => e.isBoss) : []),
-  ];
+  const picked = [...enemies.filter((e) => !e.isBoss).slice(0, grunts), ...(withBoss ? enemies.filter((e) => e.isBoss) : [])];
   for (const e of picked) {
     e.pos = spot.clone();
     e.state = "chasing";
   }
+  encounterCooldownUntil = 0;
+  k.setCamPos(player.pos);
 }
 
-resetGame();
-applyFightParam();
-// Read-only snapshot for the browser-driven playtest script (tools/playtest.mjs).
-(window as unknown as { __game: () => unknown }).__game = () => ({
-  run: runState,
-  phase: activeEncounter?.phase ?? null,
-  turn: activeEncounter?.turnNumber ?? 0,
-  difficulty: activeEncounter?.difficulty ?? null,
-  hp: player.hp,
-  energy: player.energy,
-  block: player.block,
-  player: { x: player.pos.x, y: player.pos.y },
-  piles: { draw: piles.draw.length, hand: piles.hand.map((c) => c.name), discard: piles.discard.length, exhaust: piles.exhaust.length },
-  cam: { x: k.getCamPos().x, y: k.getCamPos().y, scale: k.getCamScale().x },
-  target: selectedTarget?.exists() ? selectedTarget.enemyId : null,
-  enemies: enemies
-    .filter((e) => e.exists())
-    .map((e) => {
-      const s = k.toScreen(e.pos);
-      return {
-        id: e.enemyId, boss: e.isBoss, hp: e.hp, block: e.block, state: e.state, overflow: e.overflow,
-        x: e.pos.x, y: e.pos.y, sx: s.x, sy: s.y, intent: e.intent ? intentText(e) : null,
-        engageX: e.engagePos?.x ?? null, engageY: e.engagePos?.y ?? null,
-      };
-    }),
-});
-k.setCamPos(player.pos);
-k.setCamScale(1, 1);
+// ---------- main loop ----------
+
+const targetMarker = k.add([k.text("▼", { size: 16 }), k.pos(0, 0), k.anchor("center"), k.color(255, 255, 80), k.opacity(0), k.z(20)]);
+// While exploring, points at the nearest camp that's still standing when it's
+// off screen (on a phone the start view shows no enemies at all).
+const campPointer = k.add([k.text("", { size: 15 }), k.pos(0, 0), k.anchor("center"), k.color(255, 210, 80), k.opacity(0), k.fixed(), k.z(30)]);
+
+function updateCampPointer() {
+  const alive = enemies.filter((e) => e.exists() && e.spawnId);
+  if (!playing() || activeEncounter || screenOpen() || !alive.length) return void (campPointer.opacity = 0);
+  const nearest = alive.reduce((a, b) => (a.pos.dist(player.pos) <= b.pos.dist(player.pos) ? a : b));
+  const p = k.toScreen(nearest.pos);
+  const safe = measureSafe();
+  const pad = 70;
+  if (p.x > safe.x0 && p.x < safe.x1 && p.y > safe.y0 && p.y < safe.y1) return void (campPointer.opacity = 0);
+  const c = k.vec2((safe.x0 + safe.x1) / 2, (safe.y0 + safe.y1) / 2);
+  const d = p.sub(c);
+  const t = Math.min(
+    Math.abs(d.x) > 0 ? ((safe.x1 - safe.x0) / 2 - pad) / Math.abs(d.x) : Infinity,
+    Math.abs(d.y) > 0 ? ((safe.y1 - safe.y0) / 2 - 24) / Math.abs(d.y) : Infinity,
+  );
+  const arrows = ["→", "↘", "↓", "↙", "←", "↖", "↑", "↗"];
+  const arrow = arrows[Math.round(((Math.atan2(d.y, d.x) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8];
+  const area = AREAS.find((a) => ENEMY_SPAWNS.find((s) => s.id === nearest.spawnId)?.area === a.id);
+  campPointer.text = `${arrow} ${area?.name ?? "enemies"}`;
+  campPointer.pos = c.add(d.scale(t));
+  campPointer.opacity = 1;
+}
 
 // Invariant: the 14-card deck is always fully accounted for across all piles.
 const DECK_SIZE = totalCards(piles);
 
-// ---------- main loop ----------
-
-function incomingDamage(): number {
-  return aliveRoster().reduce((sum, e) => sum + (e.intent?.kind === "attack" ? e.intent.value : 0), 0);
-}
-
 k.onUpdate(() => {
   const now = k.time();
-  const playing = runState === "playing";
   const enc = activeEncounter;
+  const base = baseScale();
 
-  if (playing && !enc) {
+  if (playing() && !enc && !screenOpen()) {
     const move = k.vec2(0, 0);
-    if (k.isKeyDown("left") || k.isKeyDown("a")) move.x -= 1;
-    if (k.isKeyDown("right") || k.isKeyDown("d")) move.x += 1;
-    if (k.isKeyDown("up") || k.isKeyDown("w")) move.y -= 1;
-    if (k.isKeyDown("down") || k.isKeyDown("s")) move.y += 1;
-    if (move.len() > 0) player.pos = player.pos.add(move.unit().scale(PLAYER_SPEED * k.dt()));
-    player.pos.x = k.clamp(player.pos.x, 16, WORLD_WIDTH - 16);
-    player.pos.y = k.clamp(player.pos.y, 16, WORLD_HEIGHT - 16);
+    if (held.has("arrowleft") || held.has("a")) move.x -= 1;
+    if (held.has("arrowright") || held.has("d")) move.x += 1;
+    if (held.has("arrowup") || held.has("w")) move.y -= 1;
+    if (held.has("arrowdown") || held.has("s")) move.y += 1;
+    if (move.len() === 0 && moveTarget) {
+      if (k.isMouseDown("left")) moveTarget = k.toWorld(k.mousePos());
+      const to = moveTarget.sub(player.pos);
+      if (to.len() < 6) moveTarget = null;
+      else {
+        move.x = to.x;
+        move.y = to.y;
+      }
+    }
+    if (move.len() > 0) {
+      const step = Math.min(PLAYER_SPEED * k.dt(), moveTarget ? moveTarget.dist(player.pos) : Infinity);
+      player.pos = player.pos.add(move.unit().scale(step));
+    }
+    player.pos.x = k.clamp(player.pos.x, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE);
+    player.pos.y = k.clamp(player.pos.y, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE);
 
     const explorers = enemies.filter((e) => e.exists());
     for (const e of explorers) updateEnemyAI(e);
-    separate(explorers, k.dt(), {
-      padding: SEPARATION_PADDING,
-      speed: SEPARATION_SPEED,
-      worldW: WORLD_WIDTH,
-      worldH: WORLD_HEIGHT,
-    });
+    separate(explorers, k.dt(), { padding: SEPARATION_PADDING, speed: SEPARATION_SPEED, worldW: WORLD_WIDTH, worldH: WORLD_HEIGHT });
     if (now >= encounterCooldownUntil) tryTriggerEncounter(now);
   }
 
@@ -945,23 +1418,25 @@ k.onUpdate(() => {
     }
   }
 
-  // Camera: fights (from formation onward) hold the framing planned from the
-  // final slots; everything else follows the player at 1x. Position is
-  // re-clamped at the *current* scale every frame so a zoom transition never
+  // Camera: fights (from formation on) hold the framing planned from the final
+  // slots; everything else follows the player at exploration zoom. Position is
+  // re-clamped at the *current* scale every frame, so a zoom transition never
   // shows past the map edge.
   const cur = activeEncounter;
   const framed = !!cur && cur.phase !== "unforming";
   const targetPos = framed ? cur!.camPos : player.pos;
-  const targetScale = framed ? cur!.camScale : 1;
+  const targetScale = framed ? cur!.camScale : base;
   const lerpT = Math.min(1, CAM_LERP_RATE * k.dt());
   const scale = k.getCamScale().x + (targetScale - k.getCamScale().x) * lerpT;
   const rawPos = k.getCamPos().lerp(targetPos, lerpT);
-  const clamped = clampCam({ x: rawPos.x, y: rawPos.y }, scale, VIEWPORT);
+  const clamped = clampCam({ x: rawPos.x, y: rawPos.y }, scale, {
+    viewW: k.width(), viewH: k.height(), worldW: WORLD_WIDTH, worldH: WORLD_HEIGHT, safe: { x0: 0, y0: 0, x1: 0, y1: 0 },
+  });
   k.setCamScale(scale, scale);
   k.setCamPos(clamped.x, clamped.y);
 
-  // Visibility: participants on stage are full, overflow participants are
-  // shown only in the side list, bystanders are dimmed while a fight runs.
+  // Participants on stage are full, side-list participants are hidden from the
+  // map, bystanders are dimmed while a fight runs.
   for (const e of enemies) {
     if (!e.exists()) continue;
     const inFight = !!cur && cur.roster.includes(e);
@@ -972,6 +1447,14 @@ k.onUpdate(() => {
     if (hpL) hpL.opacity = o;
     if (stL) stL.opacity = o;
   }
+  // Ground labels name the camps while exploring and get out of the way of
+  // HP / intent text during fights.
+  const clearedNow = clearedAreas(checkpointPreview());
+  for (const a of AREAS) {
+    const label = areaLabels.get(a.id);
+    const text = cur ? "" : clearedNow.includes(a.id) ? `${a.name} (cleared)` : a.name;
+    if (label && label.text !== text) label.text = text;
+  }
 
   if (cur && (!selectedTarget || !selectedTarget.exists() || !cur.roster.includes(selectedTarget))) {
     const alive = aliveRoster();
@@ -980,65 +1463,70 @@ k.onUpdate(() => {
   const markerOn = !!cur && cur.phase !== "unforming" && !!selectedTarget && selectedTarget.exists() && !selectedTarget.overflow;
   targetMarker.opacity = markerOn ? 1 : 0;
   if (markerOn && selectedTarget) {
-    const off = selectedTarget.isBoss ? BOSS_LABELS.marker : TRASH_LABELS.marker;
-    targetMarker.pos = selectedTarget.pos.add(0, off);
+    targetMarker.pos = selectedTarget.pos.add(0, selectedTarget.isBoss ? BOSS_LABELS.marker : TRASH_LABELS.marker);
   }
 
-  const list = overflowList();
-  const showList = list.length > 0 && !!cur && cur.phase !== "unforming" && cur.phase !== "forming";
-  overflowScroll = k.clamp(overflowScroll, 0, Math.max(0, list.length - OVERFLOW_PANEL_ROWS));
-  overflowPanel.opacity = showList ? 1 : 0;
-  overflowTitle.opacity = showList ? 1 : 0;
-  overflowTitle.text = `+${list.length} more in fight`;
-  overflowUp.opacity = showList && overflowScroll > 0 ? 1 : 0.25 * Number(showList);
-  overflowDown.opacity = showList && overflowScroll < list.length - OVERFLOW_PANEL_ROWS ? 1 : 0.25 * Number(showList);
-  overflowRows.forEach((row, r) => {
-    const e = list[overflowScroll + r];
-    const on = showList && !!e;
-    row.bg.opacity = on ? 1 : 0;
-    row.label.opacity = on ? 1 : 0;
-    if (e) {
-      row.bg.color = e === selectedTarget ? k.rgb(110, 100, 30) : k.rgb(45, 45, 45);
-      row.label.text = `${enemyName(e)} ${e.hp}hp${e.block > 0 ? ` (blk ${e.block})` : ""} · ${intentText(e).replace("\n", " ")}`;
-    }
-  });
+  updateCampPointer();
+  renderHud();
+  renderHand();
+  renderOverflow();
 
-  hud.hp.text = `HP ${player.hp}/${PLAYER_MAX_HP}${player.block > 0 ? `  (block ${player.block})` : ""}`;
-  hud.energy.text = `Energy ${player.energy}/${PLAYER_MAX_ENERGY}`;
-  hud.state.text = cur
-    ? `${cur.difficulty === "dangerous" ? "DANGEROUS fight" : "Fight"}: ${aliveRoster().length} foe(s) alive`
-    : "Exploring";
-  if (cur) {
-    const phaseLabel: Record<Phase, string> = {
-      forming: "enemies forming up",
-      playerTurn: "YOUR TURN",
-      resolving: cur.fleeing ? "fleeing: enemies act first" : "ENEMY TURN",
-      unforming: "escaped, enemies falling back",
-    };
-    const inc = incomingDamage();
-    const after = Math.max(0, inc - player.block);
-    hud.turn.text =
-      `Turn ${cur.turnNumber} · ${phaseLabel[cur.phase]}` +
-      (cur.phase === "playerTurn" ? ` · incoming ${inc} dmg (${after} after block)` : "");
-    hud.piles.text = `draw ${piles.draw.length} · discard ${piles.discard.length} · exhausted ${piles.exhaust.length}`;
-  } else {
-    hud.turn.text = "";
-    hud.piles.text = "";
-  }
-  hud.feedback.text = now < feedbackUntil ? feedbackMessage : "";
-
-  const actable = canAct();
-  endTurnButton.color = actable ? k.rgb(60, 110, 60) : k.rgb(45, 45, 45);
-  fleeButton.color = actable ? k.rgb(120, 60, 60) : k.rgb(45, 45, 45);
-  endTurnButton.opacity = fleeButton.opacity = cur ? 1 : 0.4;
-
-  if (totalCards(piles) !== DECK_SIZE) {
-    console.error("card count drifted", totalCards(piles), piles);
-  }
-
+  if (totalCards(piles) !== DECK_SIZE) console.error("card count drifted", totalCards(piles), piles);
   if (runState === "playing" && player.hp <= 0) finishDeath();
-  if (runState === "playing" && !enemies.some((e) => e.exists())) runState = "won";
-
-  hud.status.text =
-    runState === "dead" ? "You fell - press R to restart" : runState === "won" ? "Area cleared - press R to restart" : "";
 });
+
+// Read-only snapshot for the browser-driven checks (tools/playtest.mjs).
+(window as unknown as { __game: () => unknown }).__game = () => ({
+  run: runState,
+  screen: screenOpen(),
+  saveStatus: saveClient.status.kind,
+  runNumber: run?.runNumber ?? null,
+  stats: run?.stats ?? null,
+  phase: activeEncounter?.phase ?? null,
+  turn: activeEncounter?.turnNumber ?? 0,
+  difficulty: activeEncounter?.difficulty ?? null,
+  hp: player.hp,
+  energy: player.energy,
+  block: player.block,
+  player: { x: player.pos.x, y: player.pos.y },
+  piles: { draw: piles.draw.length, hand: piles.hand.map((c) => c.name), discard: piles.discard.length, exhaust: piles.exhaust.length },
+  cam: { x: k.getCamPos().x, y: k.getCamPos().y, scale: k.getCamScale().x },
+  base: baseScale(),
+  view: { w: k.width(), h: k.height() },
+  safe: measureSafe(),
+  target: selectedTarget?.exists() ? selectedTarget.enemyId : null,
+  pointer: campPointer.opacity > 0 ? { x: campPointer.pos.x, y: campPointer.pos.y, text: campPointer.text } : null,
+  enemies: enemies
+    .filter((e) => e.exists())
+    .map((e) => {
+      const s = k.toScreen(e.pos);
+      return {
+        id: e.enemyId, spawnId: e.spawnId, boss: e.isBoss, hp: e.hp, block: e.block, state: e.state, overflow: e.overflow,
+        x: e.pos.x, y: e.pos.y, sx: s.x, sy: s.y, intent: e.intent ? intentText(e) : null,
+        engageX: e.engagePos?.x ?? null, engageY: e.engagePos?.y ?? null,
+      };
+    }),
+});
+
+// ---------- boot ----------
+
+async function boot() {
+  if (FIGHT_PARAM) {
+    saveClient.disable("Test fight - not saved");
+    startFromSave(newRun("run_testfight", 1, Date.now()), false);
+    applyFightParam(FIGHT_PARAM);
+    return;
+  }
+  showScreen(`<h1 id="panelTitle">Camp Clearer</h1><p>Loading your save…</p>`);
+  try {
+    // Load before anything starts, so a default new game can never overwrite a save.
+    showStartScreen(await saveClient.load());
+  } catch (err) {
+    showLoadError(err);
+  }
+}
+
+placeOverflowPanel();
+k.setCamScale(baseScale(), baseScale());
+k.setCamPos(player.pos);
+void boot();
