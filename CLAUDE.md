@@ -3,7 +3,7 @@
 The argument for what good means is `README.md`. These are the standards a
 change must meet; each one came from a playtest correction or a bug that
 reached a build. Pure rules live in `src/cards.ts`, `src/turn.ts`,
-`src/combat.ts`, `src/encounter.ts`, `src/formation.ts`, `src/separation.ts`,
+`src/combat.ts`, `src/encounter.ts`, `src/roam.ts`, `src/formation.ts`, `src/separation.ts`,
 `src/save.ts` and the data in `src/world.ts`; keep them free of Kaplay and the
 DOM so they stay testable, and keep every fight state change in
 `src/combat.ts` (main.ts animates, it doesn't decide).
@@ -31,10 +31,30 @@ DOM so they stay testable, and keep every fight state change in
   timing it asks for. Check it with `node tools/balance.ts` (whole runs must
   stay winnable) and `node tools/balance.ts hand` (does one hand play
   differently against it?), then by playing.
-- Skirmishers notice and give up alone. A pack alerts only its own members,
-  gives up together past its leash, and joins a fight whole. A fight's
-  roster is the trigger, nearby chasers and their alerted packs: no
-  recursion, no duplicates, fixed once formation starts (`src/encounter.ts`).
+- Skirmishers notice and give up alone. A pack's alert spreads only along
+  links of pack-mates at most `LINK_RADIUS` apart, its chasing members give
+  up together, and its linked, alerted members join a fight together. A
+  fight's roster is the trigger, nearby chasers and their linked pack-mates:
+  no recursion, no duplicates, fixed once formation starts (`src/encounter.ts`).
+
+## Enemies move, and stay where they are
+
+- Keep the four positions apart (`src/roam.ts`): the fixed spawn (layout,
+  migration, boss home), the real position (exploring, chasing, saving), the
+  activity center (what idle units wander around), and the fight slot
+  (display only). A fight slot must never become a position, a center, or
+  anything in a save.
+- Grunts and elites can be led anywhere; when they give up (out of reach for
+  the delay window) they settle where they are: a new center at their spot,
+  or at a pack's centroid plus each member's offset. Move a center only at
+  such moments, never while picking wander targets.
+- A boss's center is always its spawn. It gives up at the edge of its lair or
+  when out of reach, walks home ignoring the player, and only then calms.
+- Exploration runs only while exploring: the menu and fights freeze it, and
+  a restored save continues from where it was saved, with no time skipped.
+- Save positions, centers and boss homing whenever the world is checkpointed,
+  plus when enemies settle or the boss arrives home (debounced), through the
+  ordered save queue.
 - A fallen enemy is *downed*: it keeps its slot and is shown as a body until
   the fight ends, and only then is it confirmed dead and counted, once by
   stable id. Never destroy an enemy mid-fight.
@@ -118,6 +138,7 @@ APP_URL=http://localhost:8080 pnpm check   # rules + spec/ against the running a
 pnpm playtest                       # real Chrome: combat, save loop, both viewports
 node tools/playtest.mjs --suite=race   # new run vs a slow / offline final save
 node tools/playtest.mjs --suite=monsters,groups   # packs, revive, elite cycle; every camp at both viewports
+node tools/playtest.mjs --suite=roam   # wandering, pull-away, Warlord homing, guards apart, saved places
 node tools/balance.ts [runs]           # whole runs with the real rules: must stay winnable
 sh tools/persistence-check.sh       # saves survive restart and rebuild (Docker)
 pnpm check:evidence

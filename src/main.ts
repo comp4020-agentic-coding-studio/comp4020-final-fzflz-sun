@@ -470,7 +470,10 @@ function updatePackHints() {
     const label = hintPool[used++];
     const text = clusterMakeup(c[0].group!, c);
     if (label.text !== text) label.text = text;
-    label.pos = k.vec2(cx, top - 92);
+    // above the group, unless that would put it under the HUD: then below it
+    const above = k.vec2(cx, top - 92);
+    const bottom = Math.max(...c.map((e) => e.pos.y));
+    label.pos = k.toScreen(above).y < measureSafe().y0 + 8 ? k.vec2(cx, bottom + 40) : above;
     label.opacity = 1;
     shownHints.push({ group: c[0].group!, text, size: c.length });
   }

@@ -30,16 +30,16 @@ for jar in "$A" "$B"; do
   curl -s -c "$jar" -b "$jar" -X POST -H 'content-type: application/json' -d '{"baseRevision":0}' "$URL/api/runs" > "$jar.run"
 done
 # visitor A kills west-1; visitor B is wounded
-body=$(json '(()=>{j.save.enemies["west-1"]=0;delete j.save.places["west-1"];j.save.stats.kills=1;j.save.stats.wins=1;j.save.stats.fights=1;j.save.reason="victory";j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$A.run")
+body=$(json '(()=>{j.save.enemies["west-1"]=0;delete j.save.places["west-1"];j.save.places["west-2"]={x:1500,y:900,cx:1490,cy:910,homing:false};j.save.stats.kills=1;j.save.stats.wins=1;j.save.stats.fights=1;j.save.reason="victory";j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$A.run")
 curl -s -f -c "$A" -b "$A" -X PUT -H 'content-type: application/json' -d "$body" "$URL/api/save" >/dev/null || fail "save A rejected"
 body=$(json '(()=>{j.save.player.hp=9;j.save.reason="flee";j.save.stats.fights=1;j.save.stats.flees=1;j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$B.run")
 curl -s -f -c "$B" -b "$B" -X PUT -H 'content-type: application/json' -d "$body" "$URL/api/save" >/dev/null || fail "save B rejected"
 rm -f "$A.run" "$B.run"
 
 check() {
-  a=$(curl -s -b "$A" "$URL/api/save" | json 'j.save && j.save.enemies["west-1"]+","+j.save.player.hp+","+j.save.reason')
+  a=$(curl -s -b "$A" "$URL/api/save" | json 'j.save && j.save.enemies["west-1"]+","+j.save.player.hp+","+j.save.reason+","+j.save.places["west-2"].x+","+j.save.places["west-2"].cx')
   b=$(curl -s -b "$B" "$URL/api/save" | json 'j.save && j.save.enemies["west-1"]+","+j.save.player.hp+","+j.save.reason')
-  [ "$a" = "0,24,victory" ] || fail "$1: visitor A has $a, expected 0,24,victory"
+  [ "$a" = "0,24,victory,1500,1490" ] || fail "$1: visitor A has $a, expected 0,24,victory,1500,1490 (west-2 pulled away)"
   [ "$b" = "6,9,flee" ] || fail "$1: visitor B has $b, expected 6,9,flee"
   echo "  ok   $1: A=$a  B=$b"
 }
@@ -56,7 +56,7 @@ docker build -q --no-cache -t "$IMG" . >/dev/null
 up
 check "after rebuild + new container"
 
-echo "# a save written by the v1 game, planted on the volume, loads as v2"
+echo "# a save written by the v1 game, planted on the volume, loads as the current version"
 C=$(mktemp)
 curl -s -c "$C" -b "$C" "$URL/api/save" >/dev/null
 token=$(awk '$6 == "cc_visitor" { print $7 }' "$C")
@@ -67,9 +67,9 @@ docker exec "$NAME" node --disable-warning=ExperimentalWarning -e '
   const db = new DatabaseSync("/data/game.sqlite");
   db.prepare("INSERT INTO saves (visitor_id, revision, data, updated_at) VALUES (?, 1, ?, ?)").run(process.argv[1], process.argv[2], Date.now());
 ' "$vid" "$v1"
-c=$(curl -s -b "$C" "$URL/api/save" | json 'j.save.v+","+j.save.enemies["west-1"]+","+j.save.enemies["south-1"]+","+j.save.enemies["north-mage"]+","+j.save.player.hp+","+JSON.stringify(j.save.phases)')
+c=$(curl -s -b "$C" "$URL/api/save" | json 'j.save.v+","+j.save.enemies["west-1"]+","+j.save.enemies["south-1"]+","+j.save.enemies["north-mage"]+","+j.save.player.hp+","+JSON.stringify(j.save.phases)+","+j.save.places["south-1"].x+","+!!j.save.places["west-1"]')
 rm -f "$C"
-[ "$c" = '2,0,4,9,13,{"ridge-captain":0,"lair-boss":0}' ] || fail "v1 save loaded as $c"
+[ "$c" = '3,0,4,9,13,{"ridge-captain":0,"lair-boss":0},560,false' ] || fail "v1 save loaded as $c"
 echo "  ok   v1 save -> $c"
 
 cleanup

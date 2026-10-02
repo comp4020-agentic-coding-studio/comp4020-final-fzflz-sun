@@ -755,6 +755,8 @@ async function legacySuite() {
   check(g.enemies.find((e) => e.spawnId === "south-1")?.hp === 4, "a wounded v1 enemy keeps its HP");
   check(ids.has("north-mage") && ids.has("swarm-1") && ids.has("ridge-captain"), "new camps and the new mage are there to fight");
   check(g.hp === 13 && g.stats.kills === 2, `player HP and stats carried over (HP ${g.hp}, kills ${g.stats.kills})`);
+  const s1 = g.enemies.find((e) => e.spawnId === "south-1");
+  check(Math.hypot(s1.cx - s1.spawnX, s1.cy - s1.spawnY) < 0.5 && Math.hypot(s1.x - s1.spawnX, s1.y - s1.spawnY) <= s1.wander + 2, "old saves place enemies at their spawn, centered there");
 }
 
 /** Screen position of a world point (clamped inside the safe area so a tap lands on the map). */
