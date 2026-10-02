@@ -110,6 +110,7 @@ function victoryOf(s: SaveData, outcome: "won" | "dead" | "playing" = "won"): Sa
     outcome,
     player: { ...s.player, hp: outcome === "dead" ? 0 : 11 },
     enemies: killAll ? Object.fromEntries(Object.keys(s.enemies).map((k) => [k, 0])) : { ...s.enemies, "west-1": 0 },
+    places: killAll ? {} : Object.fromEntries(Object.entries(s.places).filter(([k]) => k !== "west-1")),
     stats: { fights: 1, wins: outcome === "dead" ? 0 : 1, flees: 0, kills: killAll ? 8 : 1 },
   };
 }

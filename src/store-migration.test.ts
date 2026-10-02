@@ -7,12 +7,12 @@ import { openStore } from "../server/store.ts";
 import { validateSave } from "./save.ts";
 
 // The real SQLite store, on a throwaway directory: a row written by the v1
-// game comes back as a valid v2 save, and saving over it works.
+// game comes back as a valid current save, and saving over it works.
 let dir = "";
 afterEach(() => dir && rmSync(dir, { recursive: true, force: true }));
 
 describe("stored v1 saves", () => {
-  it("are migrated to v2 on read and can be saved over", () => {
+  it("are migrated to the current version on read and can be saved over", () => {
     dir = mkdtempSync(join(tmpdir(), "cc-store-"));
     const store = openStore(dir);
     store.ensureVisitor("v1visitor");
@@ -30,7 +30,8 @@ describe("stored v1 saves", () => {
     const again = openStore(dir);
     const got = again.getSave("v1visitor")!;
     expect(got.revision).toBe(7);
-    expect(got.save.v).toBe(2);
+    expect(got.save.v).toBe(3);
+    expect(got.save.places["north-mage"]).toEqual({ x: 1395, y: 195, cx: 1395, cy: 195, homing: false });
     expect(validateSave(got.save).ok).toBe(true);
     expect(got.save.enemies["west-1"]).toBe(0);
     expect(got.save.enemies["south-1"]).toBe(4);

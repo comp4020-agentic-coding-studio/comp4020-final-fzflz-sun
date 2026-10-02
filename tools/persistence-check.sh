@@ -30,7 +30,7 @@ for jar in "$A" "$B"; do
   curl -s -c "$jar" -b "$jar" -X POST -H 'content-type: application/json' -d '{"baseRevision":0}' "$URL/api/runs" > "$jar.run"
 done
 # visitor A kills west-1; visitor B is wounded
-body=$(json '(()=>{j.save.enemies["west-1"]=0;j.save.stats.kills=1;j.save.stats.wins=1;j.save.stats.fights=1;j.save.reason="victory";j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$A.run")
+body=$(json '(()=>{j.save.enemies["west-1"]=0;delete j.save.places["west-1"];j.save.stats.kills=1;j.save.stats.wins=1;j.save.stats.fights=1;j.save.reason="victory";j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$A.run")
 curl -s -f -c "$A" -b "$A" -X PUT -H 'content-type: application/json' -d "$body" "$URL/api/save" >/dev/null || fail "save A rejected"
 body=$(json '(()=>{j.save.player.hp=9;j.save.reason="flee";j.save.stats.fights=1;j.save.stats.flees=1;j.save.savedAt+=5;return JSON.stringify({baseRevision:j.revision,save:j.save})})()' < "$B.run")
 curl -s -f -c "$B" -b "$B" -X PUT -H 'content-type: application/json' -d "$body" "$URL/api/save" >/dev/null || fail "save B rejected"

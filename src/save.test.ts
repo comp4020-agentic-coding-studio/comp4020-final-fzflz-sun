@@ -106,7 +106,7 @@ describe("phases", () => {
   });
 });
 
-describe("v1 -> v2 migration", () => {
+describe("v1 -> current migration", () => {
   const v1 = (enemies: Record<string, number>, extra: Record<string, unknown> = {}) => ({
     v: 1, runId: "run_oldsave1", runNumber: 3, startedAt: 1_700_000_000_000, savedAt: 1_700_000_100_000,
     reason: "victory", outcome: "playing", player: { hp: 17, x: 700, y: 420 },
@@ -114,10 +114,12 @@ describe("v1 -> v2 migration", () => {
     stats: { fights: 4, wins: 3, flees: 1, kills: 2 }, ...extra,
   });
 
-  it("produces a valid v2 save and keeps player, stats and identity", () => {
+  it("produces a valid current save and keeps player, stats and identity", () => {
     const up = upgradeSave(v1({ "west-1": 0, "west-2": 0 })) as SaveData;
     expect(validateSave(up).ok).toBe(true);
-    expect(up.v).toBe(2);
+    expect(up.v).toBe(3);
+    expect(up.places["west-1"]).toBeUndefined(); // dead: no place
+    expect(up.places["south-1"]).toEqual({ x: 560, y: 1010, cx: 560, cy: 1010, homing: false });
     expect(up.player).toEqual({ hp: 17, x: 700, y: 420 });
     expect(up.stats).toEqual({ fights: 4, wins: 3, flees: 1, kills: 2 });
     expect(up.runNumber).toBe(3);
@@ -163,5 +165,58 @@ describe("v1 -> v2 migration", () => {
     expect(upgradeSave(cur)).toBe(cur);
     expect(upgradeSave(null)).toBeNull();
     expect(upgradeSave({ v: 9 })).toEqual({ v: 9 });
+  });
+});
+
+describe("places (v3)", () => {
+  const withPlace = (id: string, q: Partial<SaveData["places"][string]>) => {
+    const s = clone(fresh());
+    s.places[id] = { ...s.places[id], ...q };
+    return s;
+  };
+
+  it("a fresh run places everyone at their spawn, centered there, not homing", () => {
+    const s = fresh();
+    expect(Object.keys(s.places).length).toBe(ENEMY_SPAWNS.length);
+    expect(s.places["lair-boss"]).toEqual({ x: 1905, y: 615, cx: 1905, cy: 615, homing: false });
+  });
+
+  it("accepts a grunt pulled across the map with a new center there, and a boss walking home", () => {
+    expect(validateSave(withPlace("west-1", { x: 1500, y: 900, cx: 1490, cy: 910 })).ok).toBe(true);
+    expect(validateSave(withPlace("lair-boss", { x: 1700, y: 640, homing: true })).ok).toBe(true);
+  });
+
+  it.each([
+    ["a position off the map", "west-1", { x: -5 }],
+    ["a center off the map", "west-1", { cy: 1400 }],
+    ["a boss centered away from its lair", "lair-boss", { cx: 1500 }],
+    ["a homing grunt", "west-1", { homing: true }],
+  ])("rejects %s", (_n, id, q) => {
+    expect(validateSave(withPlace(id, q as never)).ok).toBe(false);
+  });
+
+  it("places must list exactly the living enemies", () => {
+    const s = clone(fresh());
+    s.enemies["west-1"] = 0;
+    expect(validateSave(s).ok).toBe(false); // still has a place for a dead enemy
+    delete s.places["west-1"];
+    expect(validateSave(s).ok).toBe(true);
+    delete s.places["west-2"];
+    expect(validateSave(s).ok).toBe(false); // a living enemy without a place
+  });
+
+  it("a v2 save gets everyone living placed at spawn; HP, deaths and phases unchanged", () => {
+    const v2 = clone(fresh()) as any;
+    v2.v = 2;
+    delete v2.places;
+    v2.enemies["west-1"] = 0;
+    v2.enemies["south-1"] = 2;
+    v2.phases["lair-boss"] = 3;
+    const up = upgradeSave(v2) as SaveData;
+    expect(validateSave(up).ok).toBe(true);
+    expect(up.places["west-1"]).toBeUndefined();
+    expect(up.places["south-1"]).toEqual({ x: 560, y: 1010, cx: 560, cy: 1010, homing: false });
+    expect(up.enemies["south-1"]).toBe(2);
+    expect(up.phases["lair-boss"]).toBe(3);
   });
 });

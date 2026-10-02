@@ -33,7 +33,12 @@ export interface UnitDef {
   radius: number;
   /** how much this unit pushes a fight towards "dangerous" framing */
   threat: number;
+  /** idle wander radius around its center (pack members use PACK_WANDER instead) */
+  wander: number;
 }
+
+/** pack members wander less, around their own spot in the pack, so the pack stays recognisable */
+export const PACK_WANDER = 45;
 
 export const MAGE_SHOT = 2;
 
@@ -41,27 +46,27 @@ export const UNITS: Record<Role, UnitDef> = {
   brute: {
     role: "brute", tier: "normal", name: "Grunt", maxHp: 6,
     pattern: [{ kind: "attack", value: 3 }],
-    aggroRange: 210, engageRange: 40, speed: 100, radius: 14, threat: 1,
+    aggroRange: 210, engageRange: 40, speed: 100, radius: 14, threat: 1, wander: 70,
   },
   swarm: {
     role: "swarm", tier: "normal", name: "Swarmling", maxHp: 3,
     pattern: [{ kind: "attack", value: 2 }],
-    aggroRange: 190, engageRange: 36, speed: 115, radius: 10, threat: 0.5,
+    aggroRange: 190, engageRange: 36, speed: 115, radius: 10, threat: 0.5, wander: 60,
   },
   mage: {
     role: "mage", tier: "normal", name: "Mage", maxHp: 9,
     pattern: [{ kind: "attack", value: MAGE_SHOT, ranged: true }],
-    aggroRange: 230, engageRange: 40, speed: 90, radius: 13, threat: 2,
+    aggroRange: 230, engageRange: 40, speed: 90, radius: 13, threat: 2, wander: 60,
   },
   heavy: {
     role: "heavy", tier: "elite", name: "Brute captain", maxHp: 14,
     pattern: [{ kind: "attack", value: 4 }, { kind: "charge", next: 10 }, { kind: "attack", value: 10 }],
-    aggroRange: 220, engageRange: 44, speed: 85, radius: 20, threat: 3,
+    aggroRange: 220, engageRange: 44, speed: 85, radius: 20, threat: 3, wander: 55,
   },
   boss: {
     role: "boss", tier: "boss", name: "Warlord", maxHp: 40,
     pattern: [{ kind: "attack", value: 5 }, { kind: "defend", value: 8 }, { kind: "charge", next: 12 }, { kind: "attack", value: 12 }],
-    aggroRange: 260, engageRange: 46, speed: 78, radius: 28, threat: 6,
+    aggroRange: 260, engageRange: 46, speed: 78, radius: 28, threat: 6, wander: 70,
   },
 };
 
@@ -71,17 +76,18 @@ export const REVIVABLE: Role[] = ["brute", "swarm"];
 // ---------- groups: how a camp reacts ----------
 
 /**
- * skirmish: every member notices, chases and gives up on its own (you can
- * split them). pack: noticing one alerts every living member of that pack and
- * only that pack; the pack gives up together once you are `leash` px from its
- * anchor; and if any member starts a fight, the whole alerted pack joins it.
+ * skirmish: every member wanders, notices, chases and gives up on its own (you
+ * can split them). pack: members share a center they wander around; noticing
+ * one alerts every member linked to it (src/roam.ts LINK_RADIUS); they give
+ * up together; and if one starts a fight, its linked, alerted pack-mates join.
+ * The group is also the unit's identity for camps and progress, whatever
+ * part of the map it has been pulled to.
  */
 export interface Group {
   id: string;
   area: string;
   kind: "skirmish" | "pack";
   label: string;
-  leash: number;
 }
 
 export interface Area {
@@ -99,13 +105,13 @@ export const AREAS: Area[] = [
 ];
 
 export const GROUPS: Group[] = [
-  { id: "west", area: "west", kind: "skirmish", label: "Scouts", leash: 0 },
-  { id: "south", area: "south", kind: "skirmish", label: "Stray", leash: 0 },
-  { id: "hollow", area: "hollow", kind: "pack", label: "Swarm", leash: 420 },
-  { id: "north-sentry", area: "north", kind: "skirmish", label: "Sentry", leash: 0 },
-  { id: "north", area: "north", kind: "pack", label: "Mage guard", leash: 440 },
-  { id: "ridge", area: "ridge", kind: "pack", label: "Captain's guard", leash: 440 },
-  { id: "lair", area: "lair", kind: "pack", label: "Warlord's guard", leash: 480 },
+  { id: "west", area: "west", kind: "skirmish", label: "Scouts" },
+  { id: "south", area: "south", kind: "skirmish", label: "Stray" },
+  { id: "hollow", area: "hollow", kind: "pack", label: "Swarm" },
+  { id: "north-sentry", area: "north", kind: "skirmish", label: "Sentry" },
+  { id: "north", area: "north", kind: "pack", label: "Mage guard" },
+  { id: "ridge", area: "ridge", kind: "pack", label: "Captain's guard" },
+  { id: "lair", area: "lair", kind: "pack", label: "Warlord's guard" },
 ];
 
 export interface EnemySpawn {
@@ -156,13 +162,34 @@ export const GROUP_BY_ID = new Map(GROUPS.map((g) => [g.id, g]));
 /** Units whose action cycle position is part of the save. */
 export const PHASED_IDS = ENEMY_SPAWNS.filter((s) => UNITS[s.role].pattern.length > 1).map((s) => s.id);
 
-/** Where a pack's leash is measured from: the centre of its members' homes. */
+/** The centre of a group's spawn points (its original camp). */
 export function groupAnchor(groupId: string): { x: number; y: number } {
   const members = ENEMY_SPAWNS.filter((s) => s.group === groupId);
   return {
     x: members.reduce((a, s) => a + s.x, 0) / members.length,
     y: members.reduce((a, s) => a + s.y, 0) / members.length,
   };
+}
+
+/**
+ * Where a pack member sits relative to its pack's shared center: its spawn
+ * minus the centroid of the pack's non-boss spawns. Loners and bosses: 0,0
+ * (a boss's center is its own spawn, always).
+ */
+export function memberOffset(spawnId: string): { x: number; y: number } {
+  const sp = SPAWN_BY_ID.get(spawnId);
+  if (!sp || sp.boss || GROUP_BY_ID.get(sp.group)?.kind !== "pack") return { x: 0, y: 0 };
+  const mates = ENEMY_SPAWNS.filter((s) => s.group === sp.group && !s.boss);
+  const cx = mates.reduce((a, s) => a + s.x, 0) / mates.length;
+  const cy = mates.reduce((a, s) => a + s.y, 0) / mates.length;
+  return { x: sp.x - cx, y: sp.y - cy };
+}
+
+export function wanderRadiusOf(spawnId: string): number {
+  const sp = SPAWN_BY_ID.get(spawnId);
+  if (!sp) return UNITS.brute.wander;
+  const pack = GROUP_BY_ID.get(sp.group)?.kind === "pack" && !sp.boss;
+  return pack ? PACK_WANDER : UNITS[sp.role].wander;
 }
 
 // Legacy (save v1) layout, kept only so old saves can be migrated.

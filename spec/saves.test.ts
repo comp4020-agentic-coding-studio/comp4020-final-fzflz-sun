@@ -44,6 +44,7 @@ describe("saves", () => {
     const run = await startRun(api);
     const save = { ...run.save, reason: "victory", savedAt: run.save.savedAt + 10 };
     save.enemies = { ...save.enemies, "west-1": 0 };
+    save.places = Object.fromEntries(Object.entries(save.places).filter(([k]) => k !== "west-1")); // the dead have no place
     save.stats = { fights: 1, wins: 1, flees: 0, kills: 1 };
     save.player = { ...save.player, hp: 17 };
     expect((await api("PUT", "/api/save", { baseRevision: run.revision, save })).status).toBe(200);
@@ -80,11 +81,12 @@ describe("saves", () => {
     const bad = await api("PUT", "/api/save", { baseRevision: run.revision, save: { ...run.save, player: { hp: 999, x: 1, y: 1 } } });
     expect(bad.status).toBe(400);
 
-    const killed = { ...run.save, savedAt: run.save.savedAt + 1, enemies: { ...run.save.enemies, "west-1": 0 } };
+    const places = Object.fromEntries(Object.entries(run.save.places).filter(([k]) => k !== "west-1"));
+    const killed = { ...run.save, savedAt: run.save.savedAt + 1, enemies: { ...run.save.enemies, "west-1": 0 }, places };
     killed.stats = { ...killed.stats, kills: 1 };
     const ok = await api("PUT", "/api/save", { baseRevision: run.revision, save: killed });
     expect(ok.status).toBe(200);
-    const revived = { ...killed, savedAt: killed.savedAt + 1, enemies: { ...killed.enemies, "west-1": 6 } };
+    const revived = { ...killed, savedAt: killed.savedAt + 1, enemies: { ...killed.enemies, "west-1": 6 }, places: run.save.places };
     expect((await api("PUT", "/api/save", { baseRevision: ok.body.revision, save: revived })).status).toBe(422);
   });
 
