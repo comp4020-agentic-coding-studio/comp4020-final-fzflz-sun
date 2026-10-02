@@ -32,7 +32,8 @@ import {
 import { boxAt, boxFor, clampCam, formationBounds, layoutFormation, planCamera, type Rect, type Viewport } from "./formation.ts";
 import { SaveClient, SaveFlowError, type SavePayload, type SaveStatus } from "./net.ts";
 import { clearedAreas, killedCount, newRun, type CheckpointReason, type SaveData } from "./save.ts";
-import { nextAIStates, selectRoster, type AIState, type Explorer, type PackInfo } from "./encounter.ts";
+import { selectRoster, type Explorer } from "./encounter.ts";
+import { CALM_TIME, linkClusters, roamTick, settleAfterFlee, type Pt, type RoamEvent, type RoamState } from "./roam.ts";
 import { separate } from "./separation.ts";
 import { type Phase, type PhaseEvent, canAct as canActRule, transition } from "./turn.ts";
 import {
@@ -47,7 +48,8 @@ import {
   UNITS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
-  groupAnchor,
+  memberOffset,
+  wanderRadiusOf,
   type Role,
 } from "./world.ts";
 
@@ -74,8 +76,6 @@ const HAND_SIZE = 4;
 const FLEE_IMMUNITY = 2.5;
 const LOAD_IMMUNITY = 2.5; // after restoring a checkpoint, a moment to get your bearings
 const END_GRACE = 0.3;
-/** a mage hangs back this far while a pack-mate is still chasing; alone, it closes in */
-const MAGE_FOLLOW_DISTANCE = 110;
 /** pack name + makeup shows on the ground when you're this close to its camp */
 const PACK_HINT_RANGE = 560;
 
@@ -279,8 +279,14 @@ let nextEnemyId = 1;
 
 interface SpawnSpec {
   role: Role;
+  /** real position (where it was last saved, or its spawn) */
   x: number;
   y: number;
+  /** activity center; a boss's is always its spawn */
+  center: Pt;
+  /** fixed spawn point: layout, migration, boss home */
+  spawn: Pt;
+  homing: boolean;
   hp: number;
   phase: number;
   spawnId: string | null;
@@ -314,8 +320,19 @@ function spawnEnemy(spec: SpawnSpec) {
       group: spec.group,
       groupKind: (g?.kind ?? "skirmish") as "skirmish" | "pack",
       unit: makeUnit(spec.spawnId ?? `extra-${enemyId}`, spec.role, spec.group, spec.hp, spec.phase) as CombatUnit,
-      home: k.vec2(spec.x, spec.y),
-      state: "idle" as AIState,
+      key: spec.spawnId ?? `extra-${enemyId}`,
+      alive: true,
+      spawn: { ...spec.spawn },
+      center: def.tier === "boss" ? { ...spec.spawn } : { ...spec.center },
+      offset: spec.spawnId ? memberOffset(spec.spawnId) : { x: 0, y: 0 },
+      wanderRadius: spec.spawnId ? wanderRadiusOf(spec.spawnId) : def.wander,
+      wanderPace: 0.32 + Math.random() * 0.14, // a little different for everyone
+      state: (spec.homing ? "homing" : "idle") as RoamState,
+      stateUntil: 0,
+      wanderTarget: null as Pt | null,
+      pauseUntil: k.time() + Math.random() * 1.5,
+      moveSince: 0,
+      outSince: null as number | null,
       bodyRadius: def.radius, // not "radius": rect() owns that name
       mass: def.tier === "normal" ? 1 : def.tier === "elite" ? 1.6 : 2.2,
       aggroRange: def.aggroRange,
@@ -388,7 +405,7 @@ function intentLong(e: Enemy): string {
 /** Exploration label: alert state plus what's special about this unit. */
 function scoutText(e: Enemy): string {
   const tag = e.role === "mage" ? "MAGE" : "";
-  const st = e.state === "chasing" ? "!" : e.state === "returning" ? "…" : "";
+  const st = e.state === "chasing" ? "!" : e.state === "homing" ? "going home" : e.state === "calm" ? "…" : "";
   return [st, tag].filter(Boolean).join(" ");
 }
 
@@ -420,40 +437,50 @@ function flashPlayer() {
 
 // ---------- pack hints (before contact) ----------
 
-const packHints = new Map<string, { text: string; pos: Vec2; opacity: number }>();
-for (const g of GROUPS.filter((gr) => gr.kind === "pack")) {
-  const a = groupAnchor(g.id);
-  const top = Math.min(...ENEMY_SPAWNS.filter((s) => s.group === g.id).map((s) => s.y));
-  packHints.set(g.id, k.add([k.text("", { size: 13, align: "center" }), k.pos(a.x, top - 92), k.anchor("center"), k.color(200, 200, 215), k.opacity(0), k.z(-70)]));
-}
+// One hint per *cluster* of linked pack-mates, wherever they are now: a pack
+// pulled across the map takes its name with it, and a guard left far from its
+// boss shows as its own group. Fixed camp names stay on the ground separately.
+const hintPool: { text: string; pos: Vec2; opacity: number }[] = [];
+let shownHints: { group: string; text: string; size: number }[] = [];
 
-function packMakeup(groupId: string): string {
-  const live = enemies.filter((e) => e.exists() && e.group === groupId);
+function clusterMakeup(group: string, members: Enemy[]): string {
   const notes: string[] = [];
-  if (live.some((e) => e.tier === "boss")) notes.push("BOSS");
-  if (live.some((e) => e.tier === "elite")) notes.push("ELITE");
-  if (live.some((e) => e.role === "mage")) notes.push("mage");
-  return `${GROUP_BY_ID.get(groupId)!.label} · ${live.length} together${notes.length ? ` · ${notes.join(", ")}` : ""}`;
+  if (members.some((e) => e.tier === "boss")) notes.push("BOSS");
+  if (members.some((e) => e.tier === "elite")) notes.push("ELITE");
+  if (members.some((e) => e.role === "mage")) notes.push("mage");
+  const name = GROUP_BY_ID.get(group)!.label;
+  const size = members.length === 1 ? (members[0].tier === "boss" ? "alone in its lair" : "alone") : `${members.length} together`;
+  return `${name} · ${size}${notes.length ? ` · ${notes.join(", ")}` : ""}`;
 }
 
-/** While exploring near a pack: its name and makeup on the ground, and a shared outline on its members. */
+/** While exploring near a pack: its name and real makeup above it, and a shared outline on members that would come together. */
 function updatePackHints() {
-  for (const [gid, label] of packHints) {
-    const live = enemies.filter((e) => e.exists() && e.group === gid && e.state !== "engaged");
-    const a = groupAnchor(gid);
-    const near = playing() && !activeEncounter && live.length > 0 && Math.hypot(player.pos.x - a.x, player.pos.y - a.y) < PACK_HINT_RANGE;
-    label.opacity = near ? 1 : 0;
-    if (near) {
-      const t = packMakeup(gid);
-      if (label.text !== t) label.text = t;
-    }
-    for (const e of enemies) {
-      if (!e.exists() || e.group !== gid || e.tier === "elite") continue; // elites keep their gold outline
-      const want = near && e.state !== "engaged";
-      const has = e.has("outline");
-      if (want && !has) e.use(k.outline(2, k.rgb(235, 235, 235)));
-      else if (!want && has) e.unuse("outline");
-    }
+  const packed = enemies.filter((e) => e.exists() && e.groupKind === "pack" && e.state !== "engaged");
+  const clusters = linkClusters(packed);
+  const wantOutline = new Set<Enemy>();
+  shownHints = [];
+  let used = 0;
+  for (const c of clusters) {
+    const cx = c.reduce((a, e) => a + e.pos.x, 0) / c.length;
+    const top = Math.min(...c.map((e) => e.pos.y));
+    const near = playing() && !activeEncounter && Math.hypot(player.pos.x - cx, player.pos.y - top) < PACK_HINT_RANGE;
+    if (!near) continue;
+    if (c.length > 1) for (const e of c) wantOutline.add(e);
+    if (!hintPool[used]) hintPool[used] = k.add([k.text("", { size: 13, align: "center" }), k.pos(0, 0), k.anchor("center"), k.color(200, 200, 215), k.opacity(0), k.z(-70)]);
+    const label = hintPool[used++];
+    const text = clusterMakeup(c[0].group!, c);
+    if (label.text !== text) label.text = text;
+    label.pos = k.vec2(cx, top - 92);
+    label.opacity = 1;
+    shownHints.push({ group: c[0].group!, text, size: c.length });
+  }
+  for (let i = used; i < hintPool.length; i++) hintPool[i].opacity = 0;
+  for (const e of enemies) {
+    if (!e.exists() || e.tier === "elite") continue; // elites keep their gold outline
+    const want = wantOutline.has(e);
+    const has = e.has("outline");
+    if (want && !has) e.use(k.outline(2, k.rgb(235, 235, 235)));
+    else if (!want && has) e.unuse("outline");
   }
 }
 
@@ -539,15 +566,30 @@ function aliveMapEnemy(spawnId: string) {
 }
 
 /**
- * The logical world state at a stable moment: player HP and position, every
- * map enemy's HP by stable id (0 = confirmed dead), and where each elite /
- * boss is in its action cycle. Enemy positions are not saved; on restore they
- * stand at their home spot, so formation slots never leak into a save.
+ * The world state at a stable moment: player HP and position, every map
+ * enemy's HP by stable id (0 = confirmed dead), where each elite / boss is in
+ * its action cycle, and every living enemy's real position, activity center
+ * and (boss) homing flag. Wander targets and animations aren't saved: on
+ * restore each enemy picks a new target around its center.
  */
 function checkpoint(reason: CheckpointReason): SaveData | null {
   if (!run) return null;
   const enemiesHp = Object.fromEntries(ENEMY_SPAWNS.map((s) => [s.id, Math.max(0, aliveMapEnemy(s.id)?.unit.hp ?? 0)]));
   const phases = Object.fromEntries(PHASED_IDS.map((id) => [id, aliveMapEnemy(id)?.unit.phase ?? run!.phases[id] ?? 0]));
+  // Real world positions only: an enemy in a fight is saved where it stood
+  // before the formation (engagePos), never at its fight slot.
+  const places = Object.fromEntries(
+    ENEMY_SPAWNS.filter((s) => enemiesHp[s.id] > 0).map((s) => {
+      const e = aliveMapEnemy(s.id)!;
+      const p = e.engagePos ?? e.pos;
+      const r = (n: number, max: number) => Math.min(Math.max(Math.round(n), 0), max);
+      return [s.id, {
+        x: r(p.x, WORLD_WIDTH), y: r(p.y, WORLD_HEIGHT),
+        cx: e.tier === "boss" ? s.x : r(e.center.x, WORLD_WIDTH), cy: e.tier === "boss" ? s.y : r(e.center.y, WORLD_HEIGHT),
+        homing: e.tier === "boss" && e.state === "homing",
+      }];
+    }),
+  );
   const allDead = ENEMY_SPAWNS.every((s) => enemiesHp[s.id] === 0);
   const dead = runState === "dead";
   lastSavedAt = Math.max(Date.now(), lastSavedAt + 1);
@@ -563,6 +605,7 @@ function checkpoint(reason: CheckpointReason): SaveData | null {
     },
     enemies: enemiesHp,
     phases,
+    places,
     stats: { ...run.stats },
   };
   return run;
@@ -575,10 +618,7 @@ function saveCheckpoint(reason: CheckpointReason) {
 
 // ---------- exploration AI (frozen while any fight is active) ----------
 
-const PACKS = new Map<string, PackInfo>(
-  GROUPS.filter((g) => g.kind === "pack").map((g) => [g.id, { anchor: groupAnchor(g.id), leash: g.leash }]),
-);
-let packsOverride: Map<string, PackInfo> | null = null; // dev test fights disable leashes
+let devNoDisengage = false; // dev test fights: nobody gives up
 
 function explorers(): Explorer<Enemy>[] {
   return enemies
@@ -589,30 +629,35 @@ function explorers(): Explorer<Enemy>[] {
     }));
 }
 
+// A settled pack or a boss arriving home is a stable moment worth keeping;
+// several in quick succession are saved once.
+let roamSaveTimer: ReturnType<typeof setTimeout> | null = null;
+function saveAfterRoam(events: RoamEvent[]) {
+  const reason: CheckpointReason | null = events.some((e) => e.kind === "settled")
+    ? "disengage"
+    : events.some((e) => e.kind === "homed")
+      ? "homed"
+      : null;
+  if (!reason || !run || runState !== "playing") return;
+  if (roamSaveTimer) clearTimeout(roamSaveTimer);
+  roamSaveTimer = setTimeout(() => {
+    roamSaveTimer = null;
+    if (runState === "playing" && !activeEncounter) saveCheckpoint(reason);
+  }, 400);
+}
+
 function updateExploration() {
-  const list = explorers();
-  for (const [key, state] of nextAIStates(list, player.pos, packsOverride ?? PACKS)) {
-    const e = list.find((x) => x.key === key)!.ref;
-    e.state = state;
-  }
-  for (const e of enemies) {
-    if (!e.exists() || e.state === "engaged") continue;
-    const toPlayer = player.pos.sub(e.pos);
-    const dist = toPlayer.len();
-    if (e.state === "chasing") {
-      // a mage hangs back behind a pack-mate that's still chasing; alone, it closes in like anyone else
-      const escorted = e.role === "mage" && enemies.some((o) => o !== e && o.exists() && o.group === e.group && o.state === "chasing" && o.role !== "mage");
-      const stopAt = escorted ? MAGE_FOLLOW_DISTANCE : e.engageRange;
-      if (dist > stopAt) e.pos = e.pos.add(toPlayer.unit().scale(e.speed * k.dt()));
-    } else if (e.state === "returning") {
-      const toHome = e.home.sub(e.pos);
-      if (toHome.len() < 4) {
-        e.pos = e.home.clone();
-        e.state = "idle";
-      } else e.pos = e.pos.add(toHome.unit().scale(e.speed * k.dt()));
-    }
-    refreshIntentLabel(e);
-  }
+  const live = enemies.filter((e) => e.exists());
+  const events = roamTick(live, {
+    now: k.time(),
+    dt: k.dt(),
+    player: { x: player.pos.x, y: player.pos.y },
+    rnd: Math.random,
+    world: { w: WORLD_WIDTH, h: WORLD_HEIGHT },
+    noDisengage: devNoDisengage,
+  });
+  saveAfterRoam(events);
+  for (const e of live) refreshIntentLabel(e);
 }
 
 // ---------- encounter flow ----------
@@ -825,12 +870,12 @@ function finishResolve(enc: Encounter) {
 }
 
 function finishUnforming(enc: Encounter) {
-  for (const e of enc.roster) {
-    if (!e.exists()) continue;
-    if (e.formTo) e.pos = e.formTo.clone();
-    e.state = "returning";
-  }
-  encounterCooldownUntil = k.time() + FLEE_IMMUNITY;
+  // back at their pre-fight positions (formTo was set to engagePos), never
+  // their fight slots; grunts and elites settle there, a boss heads home
+  const survivors = enc.roster.filter((e) => e.exists());
+  for (const e of survivors) if (e.formTo) e.pos = e.formTo.clone();
+  settleAfterFlee(survivors, k.time(), { w: WORLD_WIDTH, h: WORLD_HEIGHT });
+  encounterCooldownUntil = k.time() + Math.max(FLEE_IMMUNITY, CALM_TIME);
   cleanupEncounter();
   if (run) run.stats.flees++;
   saveCheckpoint("flee");
@@ -1121,7 +1166,8 @@ const HOW_TO = `
 <h2>How to play</h2>
 <ul>
   <li><b>Goal:</b> clear the six camps; the Warlord waits in the last one. Walk near enemies to draw them out.</li>
-  <li><b>Who joins a fight:</b> lone enemies notice and give up on their own, so you can pull them one at a time. <b>Packs</b> (outlined, with their name on the ground) move together: pull one and the whole pack chases you, gives up together if you run far enough, and joins the fight together. Nearby enemies already chasing you join too.</li>
+  <li><b>Who joins a fight:</b> lone enemies notice and give up on their own, so you can pull them one at a time. <b>Packs</b> (outlined, with their name above them) move together: pull one and the pack-mates near it chase you, give up together, and join the fight together. Nearby enemies already chasing you join too.</li>
+  <li><b>Pulling enemies away:</b> enemies wander near their spot until they notice you. Grunts, swarmlings, mages and the elite captain follow you as far as you lead them; when they give up they stay and wander <b>where they stopped</b>. The <b>Warlord</b> only chases a short way from its lair, then walks back home and won't turn around until it gets there. Its guards can be pulled away from it; once apart, they no longer come together.</li>
   <li><b>Move:</b> WASD or arrow keys, or tap and hold on the map.</li>
   <li><b>Fight:</b> each turn you get 3 energy and 4 cards. Tap an enemy (or ←/→) to target, tap a card (or 1-4) to play it. Each enemy shows exactly what it will do; nothing happens until you <b>End turn</b> (Space).</li>
   <li><b>Enemies:</b> grunts hit for 3; swarmlings have 3 HP (one Cleave); a <b>mage</b> shoots for 2, and at the start of your turn may say it will <b>revive</b> a pack-mate who fell on an earlier turn (at half HP, once per fight). Kill the mage first and the revive never happens. The gold-outlined <b>ELITE</b> captain and the Warlord <b>charge</b> before a heavy hit; the charge names the damage coming.</li>
@@ -1144,6 +1190,8 @@ const REASON_TEXT: Record<CheckpointReason, string> = {
   victory: "after a victory",
   flee: "after escaping a fight",
   death: "when you fell",
+  disengage: "after enemies gave up a chase",
+  homed: "when the Warlord got back to its lair",
 };
 
 function summaryHtml(s: SaveData) {
@@ -1419,7 +1467,15 @@ function startFromSave(save: SaveData, restored: boolean) {
   lastSavedAt = save.savedAt;
   for (const s of ENEMY_SPAWNS) {
     const hp = save.enemies[s.id] ?? s.maxHp;
-    if (hp > 0) enemies.push(spawnEnemy({ role: s.role, x: s.x, y: s.y, hp, phase: save.phases?.[s.id] ?? 0, spawnId: s.id, group: s.group }));
+    if (hp <= 0) continue;
+    // where it was last saved (never a fight slot), wandering around its saved center
+    const q = save.places?.[s.id] ?? { x: s.x, y: s.y, cx: s.x, cy: s.y, homing: false };
+    enemies.push(
+      spawnEnemy({
+        role: s.role, x: q.x, y: q.y, center: { x: q.cx, y: q.cy }, spawn: { x: s.x, y: s.y }, homing: q.homing,
+        hp, phase: save.phases?.[s.id] ?? 0, spawnId: s.id, group: s.group,
+      }),
+    );
   }
   player.pos = k.vec2(save.player.x, save.player.y);
   if (!restored && START_PARAM) {
@@ -1506,7 +1562,7 @@ for (const el of [ui.topbar, ui.dock, ui.overflow]) layoutObserver.observe(el);
 // alerts those camps and puts the player next to the first one. Development
 // builds only; saving is switched off, and pack leashes are disabled.
 function applyFightParam(raw: string) {
-  packsOverride = new Map([...PACKS].map(([id, p]) => [id, { ...p, leash: Infinity }]));
+  devNoDisengage = true;
   if (raw.startsWith("group:")) {
     const ids = raw.slice(6).split(",");
     const first = enemies.filter((e) => e.group === ids[0]);
@@ -1521,7 +1577,10 @@ function applyFightParam(raw: string) {
     const spot = k.vec2(k.clamp(player.pos.x + side * 30, 30, WORLD_WIDTH - 30), player.pos.y);
     const loners = () => enemies.filter((e) => e.groupKind === "skirmish" && e.tier === "normal");
     for (let i = loners().length; i < n; i++) {
-      enemies.push(spawnEnemy({ role: "brute", x: spot.x, y: spot.y, hp: UNITS.brute.maxHp, phase: 0, spawnId: null, group: null }));
+      enemies.push(spawnEnemy({
+        role: "brute", x: spot.x, y: spot.y, center: { x: spot.x, y: spot.y }, spawn: { x: spot.x, y: spot.y }, homing: false,
+        hp: UNITS.brute.maxHp, phase: 0, spawnId: null, group: null,
+      }));
     }
     // N lone grunts; the boss brings its whole pack, as packs do
     const picked = [...loners().slice(0, n), ...(withBoss ? enemies.filter((e) => e.group === "lair") : [])];
@@ -1688,7 +1747,7 @@ k.onUpdate(() => {
   safe: measureSafe(),
   target: selectedTarget?.exists() ? selectedTarget.enemyId : null,
   pointer: campPointer.opacity > 0 ? { x: campPointer.pos.x, y: campPointer.pos.y, text: campPointer.text } : null,
-  packHints: [...packHints].filter(([, l]) => l.opacity > 0).map(([id, l]) => ({ id, text: l.text })),
+  packHints: shownHints.map((h) => ({ id: h.group, text: h.text, size: h.size })),
   enemies: enemies
     .filter((e) => e.exists())
     .map((e) => {
@@ -1697,6 +1756,7 @@ k.onUpdate(() => {
         id: e.enemyId, spawnId: e.spawnId, role: e.role, tier: e.tier, group: e.group, boss: e.tier === "boss", elite: e.tier === "elite",
         hp: e.unit.hp, block: e.unit.block, downed: e.unit.downed, phase: e.unit.phase, reviveUsed: e.unit.reviveUsed,
         state: e.state, overflow: e.overflow, x: e.pos.x, y: e.pos.y, sx: s.x, sy: s.y,
+        cx: e.center.x, cy: e.center.y, spawnX: e.spawn.x, spawnY: e.spawn.y, wander: e.wanderRadius,
         intent: e.unit.intent ? intentText(e) : null, label: stateLabelOf(e)?.text ?? "",
         engageX: e.engagePos?.x ?? null, engageY: e.engagePos?.y ?? null,
       };

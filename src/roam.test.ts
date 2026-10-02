@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CALM_TIME, DISENGAGE_DELAY, LAIR_RADIUS, LEASH_FACTOR, LINK_RADIUS, linkClusters, pickWanderTarget, roamTick,
+  CALM_TIME, DISENGAGE_DELAY, LAIR_RADIUS, LEASH_FACTOR, LINK_RADIUS, linkClusters, pickWanderTarget, roamTick, settleAfterFlee,
   type Pt, type RoamEvent, type RoamUnit,
 } from "./roam.ts";
 import { SPAWN_BY_ID, UNITS, WORLD_HEIGHT, WORLD_WIDTH, memberOffset, wanderRadiusOf } from "./world.ts";
@@ -244,5 +244,23 @@ describe("fights and pauses", () => {
     sim([u], 3, () => ({ x: 510, y: 500 }));
     expect(u.pos).toEqual({ x: 500, y: 500 });
     expect(u.state).toBe("engaged");
+  });
+});
+
+describe("after fleeing a fight", () => {
+  it("survivors settle where they stood before the fight; the boss heads home", () => {
+    const grunt = fromSpawn("ridge-1", { x: 1200, y: 900 });
+    const swarm = fromSpawn("ridge-2", { x: 1240, y: 930 });
+    const boss = fromSpawn("lair-boss", { x: 1500, y: 700 });
+    const lone = fromSpawn("west-1", { x: 400, y: 600 });
+    for (const u of [grunt, swarm, boss, lone]) u.state = "engaged";
+    settleAfterFlee([grunt, swarm, boss, lone], 10, WORLD);
+    expect(lone.center).toEqual({ x: 400, y: 600 });
+    expect(lone.state).toBe("calm");
+    const c = { x: 1220, y: 915 };
+    expect(grunt.center).toEqual({ x: c.x + grunt.offset.x, y: c.y + grunt.offset.y });
+    expect(swarm.center).toEqual({ x: c.x + swarm.offset.x, y: c.y + swarm.offset.y });
+    expect(boss.state).toBe("homing");
+    expect(boss.center).toEqual(boss.spawn);
   });
 });

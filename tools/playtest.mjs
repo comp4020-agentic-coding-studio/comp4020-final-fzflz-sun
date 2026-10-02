@@ -11,6 +11,7 @@
 // monsters  splitting skirmishers, whole packs, mage revive / cancel, elite cycle across flee + reload (dev server)
 // groups    each camp's fight + a big mixed fight laid out at 1920x1080 and 390x844 (dev server)
 // legacy    a v1-era save planted in the running container continues correctly (PLAYTEST_CONTAINER=<name>)
+// roam      wandering, menu pause, pull-away + settle + reload, Warlord homing, guards apart, flee positions (dev server)
 // race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -44,7 +45,7 @@ const chrome = spawn(CHROME, [
   `--user-data-dir=${profile}`,
   "--no-first-run",
   "--no-default-browser-check",
-  "--window-size=1100,800",
+  "--window-size=1250,750",
   "--disable-background-timer-throttling",
   "--disable-renderer-backgrounding",
   "--disable-backgrounding-occluded-windows",
@@ -235,7 +236,7 @@ async function walkIntoFight() {
 async function combatSuite() {
   console.log("\n# combat rules & layout (dev ?fight=, 960x540)");
   await setViewport(960, 540);
-  let g = await open("?fight=3,1,1100,800");
+  let g = await open("?fight=3,1,1250,750");
   if (!check(g && g.saveStatus === "off", "test fights switch saving off")) return;
   g = await waitFor((s) => s.phase === "playerTurn");
   check(!!g && fighters(g).length === 6, `3 stacked grunts + the Warlord's whole pack joined (${g && fighters(g).length})`);
@@ -244,7 +245,7 @@ async function combatSuite() {
   layoutChecks(g, "warlord pack + 3");
   await shot("c01_boss3");
 
-  g = await open("?fight=3,0,1100,800");
+  g = await open("?fight=3,0,1250,750");
   g = await waitFor((s) => s.phase === "playerTurn");
   check(!!g && fighters(g).length === 3, "three stacked grunts all joined; first turn started after formation");
   check(fighters(g).every((e) => e.intent), "every participant shows an intent");
@@ -312,7 +313,7 @@ async function combatSuite() {
   check(Math.abs(g.cam.scale - g.base) < 0.02, "camera back to exploration zoom");
 
   console.log("\n# corners, crowds, overflow list, boss charge");
-  for (const [name, q] of [["topLeft_boss7", "7,1,16,16"], ["bottomRight_boss7", "7,1,2184,1284"], ["topRight_4", "4,0,2184,16"], ["centre_7", "7,0,1100,800"]]) {
+  for (const [name, q] of [["topLeft_boss7", "7,1,16,16"], ["bottomRight_boss7", "7,1,2184,1284"], ["topRight_4", "4,0,2184,16"], ["centre_7", "7,0,1250,750"]]) {
     await open(`?fight=${q}`);
     g = await waitFor((s) => s.phase === "playerTurn");
     await sleep(900);
@@ -322,7 +323,7 @@ async function combatSuite() {
     check(fighters(g).length === want, `${name}: every chaser joined (${fighters(g).length}/${want})`);
     await shot(`c10_${name}`);
   }
-  await open("?fight=30,1,1100,800");
+  await open("?fight=30,1,1250,750");
   g = await waitFor((s) => s.phase === "playerTurn");
   await sleep(900);
   g = await game();
@@ -334,7 +335,7 @@ async function combatSuite() {
   check(g.target === listed[0].id, "tapping the first list entry targets that enemy");
   await shot("c20_overflow");
 
-  await open("?fight=0,1,1100,650");
+  await open("?fight=0,1,1250,750");
   g = await waitFor((s) => s.phase === "playerTurn");
   for (let t = 0; t < 2; t++) {
     await key(" ");
@@ -343,7 +344,7 @@ async function combatSuite() {
   check(fighters(g).find((e) => e.boss)?.intent === "CHARGE\nnext: ATK 12", "turn 3: the boss's charge names the coming 12-damage hit");
 
   console.log("\n# death stops the resolve");
-  await open("?fight=7,1,1100,650");
+  await open("?fight=7,1,1250,750");
   await waitFor((s) => s.phase === "playerTurn");
   await key(" ");
   g = await waitFor((s) => s.run === "dead", 10000);
@@ -712,7 +713,7 @@ async function groupLayoutSuite() {
       void outlined;
       await shot(`g_${grp}_${label}`);
     }
-    await open("?fight=9,1,1100,800");
+    await open("?fight=9,1,1250,750");
     let g = await waitFor((s) => s.phase === "playerTurn", 8000);
     await sleep(900);
     g = await game();
@@ -756,10 +757,155 @@ async function legacySuite() {
   check(g.hp === 13 && g.stats.kills === 2, `player HP and stats carried over (HP ${g.hp}, kills ${g.stats.kills})`);
 }
 
+/** Screen position of a world point (clamped inside the safe area so a tap lands on the map). */
+function screenOf(g, wx, wy) {
+  const s = g.cam.scale;
+  let x = (wx - g.cam.x) * s + g.view.w / 2;
+  let y = (wy - g.cam.y) * s + g.view.h / 2;
+  const m = 30;
+  x = Math.min(Math.max(x, g.safe.x0 + m), g.safe.x1 - m);
+  y = Math.min(Math.max(y, g.safe.y0 + m), g.safe.y1 - m);
+  return { x, y };
+}
+/** Walks the player toward a world point by repeated taps until `until(state)` or arrival. */
+async function walkToward(wx, wy, until = () => false, ms = 15000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const g = await game();
+    if (until(g)) return g;
+    if (Math.hypot(g.player.x - wx, g.player.y - wy) < 12) return g;
+    const p = screenOf(g, wx, wy);
+    await tap(p.x, p.y);
+    await sleep(150);
+  }
+  return game();
+}
+const byId = (g, id) => g.enemies.find((e) => e.spawnId === id);
+const d2 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+async function roamSuite() {
+  console.log("\n# enemies wander on their own, pause, and stay near their spot");
+  await setViewport(1280, 800);
+  await freshRunAt("220,650");
+  const track = [];
+  for (let i = 0; i < 30; i++) {
+    const g = await game();
+    track.push(byId(g, "west-1"));
+    await sleep(200);
+  }
+  const moved = track.slice(1).filter((p, i) => d2(p, track[i]) > 0.5).length;
+  const still = track.length - 1 - moved;
+  const w1 = track[0];
+  const maxOff = Math.max(...track.map((p) => Math.hypot(p.x - p.cx, p.y - p.cy)));
+  check(moved >= 4 && still >= 4, `west-1 walks and pauses (${moved} moving / ${still} still samples over 6 s)`);
+  check(maxOff <= w1.wander + 3, `it stays within its wander radius (${maxOff.toFixed(0)} <= ${w1.wander})`);
+  check(track.every((p) => p.state === "idle"), "it never noticed the far-away player");
+
+  console.log("\n# the menu freezes the world");
+  await key("Escape");
+  const a = await game();
+  await sleep(1500);
+  const b = await game();
+  const same = a.enemies.every((e) => { const f = b.enemies.find((x) => x.id === e.id); return f && d2(e, f) < 0.01; });
+  check(a.screen && same, "with the menu open no enemy moves");
+  await key("Escape");
+
+  console.log("\n# a grunt pulled away settles where it gave up, and stays there after a reload");
+  await freshRunAt("470,380");
+  let g = await waitFor((s) => byId(s, "west-1")?.state === "chasing", 4000);
+  check(!!g, "west-1 notices the player");
+  g = await walkToward(80, 80, (s) => ["calm", "idle"].includes(byId(s, "west-1")?.state) && byId(s, "west-1").state !== "chasing", 15000);
+  g = await waitFor((s) => ["calm", "idle"].includes(byId(s, "west-1")?.state), 6000);
+  const pulled = byId(g, "west-1");
+  check(!!pulled && d2({ x: pulled.cx, y: pulled.cy }, { x: pulled.spawnX, y: pulled.spawnY }) > 120, `it gave up away from home: new center (${pulled?.cx.toFixed(0)},${pulled?.cy.toFixed(0)}) vs spawn (${pulled?.spawnX},${pulled?.spawnY})`);
+  await waitText("#savePill", /Saved/, 6000);
+  await sleep(600);
+  let api = await apiState();
+  const q = api.save.places["west-1"];
+  check(api.save.reason === "disengage" && Math.abs(q.cx - pulled.cx) < 2 && Math.abs(q.cy - pulled.cy) < 2, `the server saved the new center (reason ${api.save.reason}, ${q.cx},${q.cy})`);
+  await send("Page.reload");
+  await sleep(500);
+  await waitText("#panel", /Welcome back/);
+  await tapEl("#go");
+  g = await waitFor((s) => s.run === "playing" && !s.screen);
+  const back = byId(g, "west-1");
+  check(Math.abs(back.cx - q.cx) < 1 && Math.abs(back.cy - q.cy) < 1, "after the reload it wanders around the saved center");
+  check(d2(back, { x: q.x, y: q.y }) < 3, "and starts from its saved position, not its spawn");
+  await shot("r01_pulled_grunt");
+
+  console.log("\n# the Warlord goes home; its guards stay where they gave up");
+  await freshRunAt("1690,500");
+  g = await waitFor((s) => byId(s, "lair-boss")?.state === "chasing", 5000);
+  check(!!g && byId(g, "lair-guard")?.state === "chasing", "the lair wakes together (guards and boss are linked at home)");
+  let sawHoming = false;
+  const lured = (s) => {
+    if (byId(s, "lair-boss")?.state === "homing") sawHoming = true;
+    return sawHoming && ["calm", "idle"].includes(byId(s, "lair-guard")?.state);
+  };
+  // lure them south-west on a route that stays clear of the other camps
+  for (const [wx, wy] of [[1350, 900], [1150, 820], [1350, 900]]) {
+    g = await walkToward(wx, wy, lured, 12000);
+    if (lured(g)) break;
+  }
+  check(sawHoming, "the Warlord turned back at the edge of its lair");
+  g = await waitFor((s) => byId(s, "lair-boss")?.state !== "homing" && ["calm", "idle"].includes(byId(s, "lair-guard")?.state), 15000);
+  const boss = byId(g, "lair-boss");
+  const guard = byId(g, "lair-guard");
+  check(!!boss && d2(boss, { x: boss.spawnX, y: boss.spawnY }) <= boss.wander + 3 && boss.cx === boss.spawnX, "it walked back and wanders in its lair again");
+  check(!!guard && d2({ x: guard.cx, y: guard.cy }, { x: guard.spawnX, y: guard.spawnY }) > 250, `its guard settled away from the lair (${d2({ x: guard.cx, y: guard.cy }, { x: guard.spawnX, y: guard.spawnY }).toFixed(0)} px)`);
+  await waitText("#savePill", /Saved/, 6000);
+  await sleep(700);
+  api = await apiState();
+  check(!api.save.places["lair-boss"].homing && Math.abs(api.save.places["lair-boss"].x - 1905) < 80, `the server has the Warlord home (reason ${api.save.reason})`);
+  const hints = (await game()).packHints;
+  check(hints.some((h) => h.id === "lair" && /2 together/.test(h.text)), `the guards' hint follows them and counts only who's together (${hints.map((h) => h.text).join(" | ")})`);
+  await shot("r02_guards_apart");
+
+  console.log("\n# far guards fight without the Warlord; fleeing puts them back where they stood");
+  g = await walkToward(guard.x, guard.y, (s) => !!s.phase, 15000);
+  g = await waitFor((s) => s.phase === "playerTurn", 8000);
+  const roster = (s) => s.enemies.filter((e) => e.state === "engaged").map((e) => e.spawnId).sort();
+  check(!!g && !roster(g).includes("lair-boss") && roster(g).includes("lair-guard"), `the guards' fight leaves the Warlord in its lair (${g && roster(g)})`);
+  const before = Object.fromEntries(g.enemies.filter((e) => e.state === "engaged").map((e) => [e.spawnId, { x: e.engageX, y: e.engageY }]));
+  await key("f");
+  g = await waitFor((s) => s.phase === null, 10000);
+  const backHome = Object.keys(before).every((id) => { const e = byId(g, id); return !e || d2(e, before[id]) < 1; });
+  check(backHome, "after fleeing, survivors stand where they were before the fight (not at their slots)");
+  const centersOk = Object.keys(before).every((id) => { const e = byId(g, id); return !e || d2({ x: e.cx, y: e.cy }, before[id]) < 120; });
+  check(centersOk, "and their new center is there too");
+
+  console.log("\n# the Warlord alone doesn't pull far guards in; a homing Warlord saved mid-walk keeps walking after a reload");
+  // the guards settled right beside the player: let them come again and finish them this time
+  g = await waitFor((s) => s.phase === "playerTurn", 12000);
+  if (g) {
+    g = await fightToEnd(true);
+    check(g.phase === null && !byId(g, "lair-guard") && !byId(g, "lair-guard-2"), "beat the guards away from the lair");
+  }
+  g = await walkToward(1700, 615, (s) => !!s.phase, 20000);
+  g = await waitFor((s) => s.phase === "playerTurn", 8000);
+  check(!!g && JSON.stringify(roster(g)) === JSON.stringify(["lair-boss"]), `at the lair the Warlord fights alone (${g && roster(g)})`);
+  await key("f");
+  g = await waitFor((s) => s.phase === null, 10000);
+  check(byId(g, "lair-boss")?.state === "homing" || byId(g, "lair-boss")?.state === "calm", `after fleeing, the Warlord ${byId(g, "lair-boss")?.state === "homing" ? "walks home" : "is already home"}`);
+  await waitText("#savePill", /Saved/, 6000);
+  await sleep(300);
+  api = await apiState();
+  if (api.save.places["lair-boss"].homing) {
+    await send("Page.reload");
+    await sleep(500);
+    await waitText("#panel", /Welcome back/);
+    await tapEl("#go");
+    g = await waitFor((s) => s.run === "playing" && !s.screen);
+    check(byId(g, "lair-boss").state === "homing", "restored mid-walk, it is still going home");
+    g = await waitFor((s) => byId(s, "lair-boss")?.state !== "homing", 15000);
+    check(!!g && d2(byId(g, "lair-boss"), { x: 1905, y: 615 }) < 80, "and gets there");
+  } else console.log("  (the Warlord was already home when the flee was saved; homing restore covered by src/save.test.ts)");
+}
+
 async function prodGuardSuite() {
   console.log("\n# production build: test entry points are off");
   await setViewport(1280, 800);
-  const g = await open("?fight=3,1,1100,800");
+  const g = await open("?fight=3,1,1250,750");
   const text = await waitText("#panel", /Start a run|Welcome back|Your last run/);
   check(/Start a run|Welcome back|Your last run/.test(text) && g.saveStatus !== "off" && g.phase === null, "?fight= is ignored: the normal start screen shows and saving stays on");
 }
@@ -778,6 +924,7 @@ async function main() {
     else if (s === "monsters") await monstersSuite();
     else if (s === "groups") await groupLayoutSuite();
     else if (s === "legacy") await legacySuite();
+    else if (s === "roam") await roamSuite();
   }
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }

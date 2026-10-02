@@ -136,6 +136,7 @@ function settle(us: RoamUnit[], o: RoamOpts, events: RoamEvent[]) {
 }
 
 function sendHome(u: RoamUnit, o: RoamOpts, events: RoamEvent[]) {
+  u.center = { ...u.spawn }; // a boss's center is its lair, always
   u.state = "homing";
   u.wanderTarget = null;
   u.outSince = null;
@@ -248,5 +249,29 @@ export function roamTick(units: RoamUnit[], o: RoamOpts): RoamEvent[] {
     u.pos.x = clamp(u.pos.x, margin, o.world.w - margin);
     u.pos.y = clamp(u.pos.y, margin, o.world.h - margin);
   }
+  return events;
+}
+
+/**
+ * After a fled fight: survivors are back at their pre-fight positions (the
+ * formation slot is never kept). Grunts and elites settle there (a pack
+ * around the centroid of its surviving members); a boss walks home unless
+ * it's already in its lair spot. Returns what to save.
+ */
+export function settleAfterFlee(units: RoamUnit[], now: number, world: { w: number; h: number }): RoamEvent[] {
+  const events: RoamEvent[] = [];
+  const o: RoamOpts = { now, dt: 0, player: { x: 0, y: 0 }, rnd: Math.random, world };
+  const live = units.filter((u) => u.alive);
+  for (const u of live.filter((x) => x.tier === "boss")) {
+    if (dist(u.pos, u.spawn) > 4) sendHome(u, o, events);
+    else {
+      u.state = "calm";
+      u.stateUntil = now + CALM_TIME;
+    }
+  }
+  const rest = live.filter((x) => x.tier !== "boss");
+  for (const u of rest.filter((x) => x.groupKind === "skirmish")) settle([u], o, events);
+  const packs = new Set(rest.filter((x) => x.groupKind === "pack").map((x) => x.group));
+  for (const g of packs) settle(rest.filter((x) => x.groupKind === "pack" && x.group === g), o, events);
   return events;
 }

@@ -86,9 +86,10 @@ describe("the map's camps", () => {
       }
   });
 
-  it("the two west scouts can be pulled one at a time", () => {
+  it("the two west scouts can be pulled one at a time, even after both wander towards each other", () => {
     const [a, b] = ENEMY_SPAWNS.filter((s) => s.group === "west");
-    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(UNITS.brute.aggroRange);
+    expect(Math.hypot(a.x - b.x, a.y - b.y) - 2 * UNITS.brute.wander).toBeGreaterThan(UNITS.brute.aggroRange / 2);
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThan(UNITS.brute.aggroRange + UNITS.brute.wander);
   });
 
   it("pack offsets put each member back on its spawn around the pack's original center", () => {

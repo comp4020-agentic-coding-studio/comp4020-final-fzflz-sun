@@ -133,9 +133,9 @@ const spawn = (id: string, role: Role, group: string, x: number, y: number): Ene
 
 // Ids up to lair-boss date from save v1 and keep their roles; the rest are v2.
 export const ENEMY_SPAWNS: EnemySpawn[] = [
-  // 1. scouts you can split: far enough apart to pull one at a time
+  // 1. scouts you can split: far enough apart (even wandering) to pull one at a time
   spawn("west-1", "brute", "west", 640, 380),
-  spawn("west-2", "brute", "west", 860, 470),
+  spawn("west-2", "brute", "west", 900, 610),
   spawn("south-1", "brute", "south", 560, 1010),
   // 2. a swarm pack: one Cleave clears it if you take all three
   spawn("swarm-1", "swarm", "hollow", 990, 1050),
