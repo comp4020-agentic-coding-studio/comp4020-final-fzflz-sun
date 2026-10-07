@@ -162,6 +162,11 @@ Report what was actually run, and say plainly what wasn't verified.
 In browser save checks, derive the expected cleared camps from the saved roster.
 Winning one encounter against a split skirmisher does not clear its whole camp;
 assert saved kills, wins and camp progress separately.
+Wait for a newer server checkpoint matching the run and result, not just an
+already-visible Saved pill or one checkpoint reason. Account for the nearest
+enemy's visibility when checking navigation, and report legitimate defeat in
+resize tests that continue with damaged HP. Keep browser startup and request
+waits bounded; retain diagnostics rather than retrying failures without review.
 
 ## Process
 

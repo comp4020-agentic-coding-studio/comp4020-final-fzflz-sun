@@ -56,6 +56,19 @@ camp count and checks kills/wins separately. This correction is also recorded in
 records verification of the correction; the earlier green run does not erase
 this observed failure.
 
+The [next PR run 37577502535](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/37577502535)
+failed before starting a suite: Chrome had not written its debugging port file
+within the old ten-second startup budget. Startup now has a bounded 45-second
+budget and retains up to 64 KiB of Chrome diagnostics in `chrome.log`, with its
+debugging endpoint removed. The total eight-minute run deadline still applies.
+Review also corrected two timing/scenario assumptions: the save check waits for
+the actual newer server checkpoint, and phone navigation only needs a pointer
+when the nearest enemy is off screen. After resizing, touch input must advance
+the turn; the second fight explicitly records victory or legitimate defeat,
+since it uses the first fight's remaining HP. Subsequent results are available
+in the PR check history above; these changes are not covered by the earlier
+green run.
+
 The author has not supplied new enjoyment judgments or independent player
 observations for this change. The first-play and art sheets remain templates.
 This is implementation evidence, not a new release record; the workflow's main

@@ -88,7 +88,12 @@ const chrome = spawn(CHROME, [
   "--disable-backgrounding-occluded-windows",
   ...(HEADLESS ? ["--headless"] : []),
   "about:blank",
-], { stdio: "ignore" });
+], { stdio: ["ignore", "ignore", "pipe"] });
+let chromeDiagnostics = "";
+chrome.stderr.on("data", (chunk) => {
+  // Keep a bounded startup/render diagnostic, never persist the debugging endpoint.
+  chromeDiagnostics = (chromeDiagnostics + chunk.toString()).slice(-65536);
+});
 let startupError;
 chrome.on("error", (error) => { startupError = error; });
 chrome.on("exit", (code, signal) => {
@@ -108,7 +113,8 @@ function rejectPending(error) {
 
 async function connect() {
   let lastError;
-  for (let i = 0; i < 50; i++) {
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
     if (startupError) throw startupError;
     try {
       const port = Number(readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
@@ -161,7 +167,7 @@ async function connect() {
     }
     await sleep(200);
   }
-  throw new Error(`Could not reach Chrome: ${lastError?.message ?? "no debugging endpoint"}`);
+  throw new Error(`Could not reach Chrome within 45 seconds: ${lastError?.message ?? "no debugging endpoint"}; see chrome.log`);
 }
 function send(method, params = {}) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Chrome is not connected"));
@@ -448,9 +454,11 @@ async function saveSuite(viewport = { w: 1280, h: 800, mobile: false }, label = 
   await shot(`s01_title_${label}`);
   await tapEl("#go");
   g = await waitFor((s) => s.run === "playing" && !s.screen, 6000);
-  check(!!g && g.runNumber === 1, "Start creates run #1 on the server");
+  if (!check(!!g && g.runNumber === 1, "Start creates run #1 on the server")) return;
   const pill = await waitText("#savePill", /Saved/);
   check(/Saved/.test(pill), `save status shows server confirmation (“${pill}”)`);
+  const initial = await waitApiState((a) => a.save?.runNumber === g.runNumber && a.save.outcome === "playing");
+  if (!check(!!initial, "server holds the newly started run")) return;
 
   const mapIds = (s) => new Set(s.enemies.filter((e) => e.spawnId).map((e) => e.spawnId));
   const beforeFight = mapIds(await game());
@@ -462,16 +470,21 @@ async function saveSuite(viewport = { w: 1280, h: 800, mobile: false }, label = 
   layoutChecks(g, `real fight ${label}`);
   await shot(`s02_fight_${label}`);
   g = await fightToEnd(true);
-  check(g.phase === null && g.run === "playing", `won the fight with taps only (HP ${g.hp})`);
-  const savedText = await waitText("#savePill", /Saved/, 8000);
-  check(/Saved/.test(savedText), "victory checkpoint confirmed by the server");
+  if (!check(g?.phase === null && g.run === "playing", `won the fight with taps only (HP ${g?.hp})`)) return;
   const afterWin = await game();
   const killed = [...beforeFight].filter((id) => !mapIds(afterWin).has(id));
   check(killed.length >= 1, `killed ${killed.join(", ")}`);
 
-  const api = await evaluate(`fetch("/api/save").then(r => r.json()).then(j => JSON.stringify(j))`);
-  const stored = JSON.parse(api).save;
-  check(stored.reason === "victory" && stored.player.hp === afterWin.hp, `server holds the victory checkpoint (HP ${stored.player.hp})`);
+  // A Saved pill can describe an earlier write, and a later legal checkpoint can
+  // replace reason= victory. Wait for this run's actual result on the server.
+  const confirmed = await waitApiState((a) => a.revision > initial.revision &&
+    a.save?.runId === initial.save.runId && a.save.player.hp === afterWin.hp &&
+    a.save.stats.wins === afterWin.stats.wins && a.save.stats.kills === afterWin.stats.kills &&
+    killed.every((id) => a.save.enemies[id] === 0));
+  if (!check(!!confirmed, "server confirms this run's victory, HP and killed enemies in a newer checkpoint")) return;
+  const stored = confirmed.save;
+  const savedText = await waitText("#savePill", /Saved/, 8000);
+  check(/Saved/.test(savedText), "save status shows confirmation after the verified victory");
   check(killed.every((id) => stored.enemies[id] === 0), "server records the killed enemies by stable id");
 
   await send("Page.reload");
@@ -517,8 +530,13 @@ async function viewportSuite() {
 
   console.log("\n# phone controls & a resize mid-fight");
   await setViewport(390, 844, true);
+  await sleep(200); // Navigation is recalculated by the next game frame.
   let g = await game();
-  check(!!g.pointer, `on the phone an edge pointer shows the way to the nearest camp (“${g.pointer?.text}”)`);
+  const nearest = g.enemies.filter((e) => e.spawnId).sort((a, b) =>
+    Math.hypot(a.x - g.player.x, a.y - g.player.y) - Math.hypot(b.x - g.player.x, b.y - g.player.y))[0];
+  const offScreen = nearest && !(nearest.sx > g.safe.x0 && nearest.sx < g.safe.x1 && nearest.sy > g.safe.y0 && nearest.sy < g.safe.y1);
+  const needsPointer = !!offScreen && g.run === "playing" && !g.phase && !g.screen;
+  check(!!g.pointer === needsPointer, `phone navigation matches the nearest enemy's visibility (${needsPointer ? "edge pointer" : "no pointer needed"})`);
   g = await walkIntoFight();
   g = await waitFor((s) => s.phase === "playerTurn", 8000);
   if (g) {
@@ -538,14 +556,30 @@ async function viewportSuite() {
     await shot("v02_resized");
     await setViewport(390, 844, true);
     await sleep(1200);
-    layoutChecks(await game(), "after resizing back to the phone");
+    g = await game();
+    layoutChecks(g, "after resizing back to the phone");
+    if (!check(g.phase === "playerTurn", "resizing preserves the player's active turn")) return;
+    const previousTurn = g.turn;
+    if (!check(await tapEl("#endTurn"), "End turn remains visible and tappable after resizing")) return;
+    g = await waitFor((s) => (s.phase === "playerTurn" && s.turn > previousTurn) || (s.phase === null && s.run === "dead" && s.hp === 0), 10000);
+    check(!!g, "End turn still responds to touch after both resizes");
     g = await fightToEnd(true);
-    check(g.phase === null, "finished the fight after the resizes");
+    check(g?.phase === null && (g.run === "playing" || (g.run === "dead" && g.hp === 0)),
+      `fight resolves correctly after the resizes (${g?.run === "dead" ? "defeat" : "victory"}, HP ${g?.hp})`);
   } else check(false, "phone: walked into a fight");
 }
 
 async function apiState() {
   return JSON.parse(await evaluate(`fetch("/api/save").then(r => r.json()).then(j => JSON.stringify(j))`));
+}
+async function waitApiState(predicate, ms = 8000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const state = await apiState();
+    if (predicate(state)) return state;
+    await sleep(100);
+  }
+  return null;
 }
 async function network(conditions) {
   await send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1, ...conditions });
@@ -1045,6 +1079,7 @@ Promise.race([main(), new Promise((_, reject) => { runTimer = setTimeout(() => r
         worktreeDirty, baseUrl: BASE, headless: HEADLESS, platform: process.platform, node: process.version,
         suites: SUITES, completedSuites, failures, results }, null, 2) + "\n");
       writeFileSync(join(OUT, "checks.log"), output.join("\n") + "\n");
+      writeFileSync(join(OUT, "chrome.log"), chromeDiagnostics.replace(/ws:\/\/[^\s]+/g, "[debugging endpoint omitted]"));
     } catch { check(false, "Could not write the browser verification artifacts."); }
     process.exit(failures ? 1 : 0);
   });
