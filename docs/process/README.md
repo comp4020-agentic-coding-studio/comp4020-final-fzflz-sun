@@ -8,6 +8,7 @@ This guide adds a way to record a change and its review, without duplicating the
 - [Independent first-play template](playtest.md)
 - [Future art sample and asset record](art.md)
 - [Release record template and dated releases](../releases/README.md)
+- [Process tools: actual 7 October verification](2026-10-07-verification.md)
 
 ## Working loop
 

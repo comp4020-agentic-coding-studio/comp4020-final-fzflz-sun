@@ -6,8 +6,8 @@ Stage implementation evidence belongs in the
 
 - [Crit 8: 3 October 2026](2026-10-03-crit-8.md) is a historical account of the
   agent-driven release checks performed that day.
-- The process documentation added on 7 October 2026 has not been deployed by
-  this documentation change. It is not part of the Crit 8 release above.
+- The process tools first prepared on 7 October 2026 are later work. They are
+  not part of the Crit 8 release or its tag above.
 
 ## Release record template
 
