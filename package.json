@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test",
     "check:evidence": "node scripts/check-evidence.ts",
+    "check:browser": "node tools/playtest.mjs --headless --suite=prodguard,viewports",
+    "check:deploy": "node scripts/verify-deploy.ts",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "playtest": "node tools/playtest.mjs",

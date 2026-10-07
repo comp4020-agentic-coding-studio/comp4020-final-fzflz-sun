@@ -40,6 +40,22 @@ jobs:
         run: pnpm check
         env:
           APP_URL: http://localhost:8080
+      - name: Play the production image in Chrome
+        # viewports includes a real fight, save/reload and visitor isolation
+        # at desktop and touch-phone sizes; no development test encounters.
+        run: pnpm check:browser http://localhost:8080/
+        env:
+          SHOTS: artifacts/browser
+      - name: Verify the production page and save API
+        run: pnpm check:deploy -- http://localhost:8080/
+      - name: Keep browser screenshots and results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-${{ github.sha }}
+          path: artifacts/browser/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Show the app's output
         # what the container printed, so a crash or slow boot is visible
         if: ${{ failure() }}
@@ -85,17 +101,24 @@ jobs:
       APP_URL: https://${{ github.event.repository.name }}.fly.dev
     steps:
       - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+        with:
+          cache: true
+      - run: pnpm install --frozen-lockfile
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       - name: Deploy
         # --remote-only builds the Dockerfile on Fly's builders; --ha=false
         # keeps the app at one machine and one volume.
         run: flyctl deploy --remote-only --ha=false -a ${{ github.event.repository.name }}
-      - name: Verify the deployed site is online
+      - name: Verify deployed assets, README and saved trace
         run: |
-          for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL" || true)
-            if [ "$code" = "200" ]; then echo "online: $APP_URL"; exit 0; fi
-            echo "attempt $i: HTTP $code, retrying in 10s..."
-            sleep 10
-          done
-          echo "site did not return 200"; exit 1
+          mkdir -p artifacts/deploy
+          pnpm check:deploy -- "$APP_URL" 2>&1 | tee artifacts/deploy/checks.log
+      - name: Keep the deployment verification result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-${{ github.sha }}
+          path: artifacts/deploy/
+          if-no-files-found: warn
+          retention-days: 14

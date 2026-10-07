@@ -2,6 +2,8 @@ node_modules/
 dist/
 # local SQLite saves for `pnpm dev` (production uses the /data volume)
 .data/
+.local/
+artifacts/
 *.log
 
 # editor and OS junk

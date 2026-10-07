@@ -1,8 +1,8 @@
-// Browser-driven playtest: opens a real (windowed) Chrome over the DevTools
+// Browser-driven playtest: opens an isolated Chrome over the DevTools
 // protocol, plays through actual key / mouse / touch input, and checks the
 // state the page exposes on window.__game.
 //
-//   node tools/playtest.mjs [baseUrl] [--suite=combat,save,viewports]
+//   node tools/playtest.mjs [baseUrl] [--suite=combat,save,viewports] [--headless]
 //
 // combat    rules, layout and camera in dev-only ?fight= encounters (dev server only)
 // save      stranger -> start -> real fight -> saved -> reload -> restored; two visitors isolated
@@ -15,14 +15,48 @@
 // race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const args = process.argv.slice(2);
+const KNOWN_SUITES = new Set(["combat", "save", "viewports", "prodguard", "monsters", "groups", "legacy", "roam", "race"]);
+if (args.includes("--help")) {
+  console.log("node tools/playtest.mjs [baseUrl] [--suite=" + [...KNOWN_SUITES].join(",") + "] [--headless]\nCHROME overrides the executable; SHOTS overrides the artifact directory.");
+  process.exit(0);
+}
+if (args.some((a) => a.startsWith("--") && a !== "--headless" && !a.startsWith("--suite=")) || args.filter((a) => !a.startsWith("--")).length > 1) {
+  console.error("Unknown argument. See --help.");
+  process.exit(1);
+}
 const BASE = (args.find((a) => !a.startsWith("--")) ?? "http://localhost:8080/").replace(/\/?$/, "/");
 const SUITES = (args.find((a) => a.startsWith("--suite="))?.slice(8) ?? "combat,save,viewports").split(",");
-const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 9333;
-const OUT = process.env.SHOTS ?? "/tmp/shots";
+if (SUITES.some((s) => !KNOWN_SUITES.has(s)) || new Set(SUITES).size !== SUITES.length) {
+  console.error("Empty, unknown or repeated suite. See --help.");
+  process.exit(1);
+}
+const origin = new URL(BASE);
+if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash) {
+  throw new Error("Use an HTTP(S) base URL without credentials, query or fragment.");
+}
+const CHROME = process.env.CHROME ?? [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+  join(process.env.ProgramFiles ?? "C:/Program Files", "Google/Chrome/Application/chrome.exe"),
+].find(existsSync);
+if (!CHROME) throw new Error("Chrome was not found; set CHROME to its executable.");
+const HEADLESS = args.includes("--headless") || process.env.CI === "true";
+const OUT = process.env.SHOTS ?? ".local/checks/browser";
+const startedAt = new Date().toISOString();
+const completedSuites = [];
+const results = [];
+const output = [];
+let revision = "unknown";
+let worktreeDirty = true;
+try {
+  revision = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  worktreeDirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0;
+} catch {}
 // keep in step with src/formation.ts
 const TRASH_BOX = { left: -40, right: 40, top: -70, bottom: 18 };
 const ELITE_BOX = { left: -48, right: 48, top: -96, bottom: 26 };
@@ -32,16 +66,17 @@ mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
+function log(msg) { console.log(msg); output.push(msg); }
 function check(cond, msg) {
-  console.log(`${cond ? "  ok  " : "  FAIL"} ${msg}`);
+  log(`${cond ? "  ok  " : "  FAIL"} ${msg}`);
+  results.push({ passed: !!cond, message: msg });
   if (!cond) failures++;
   return cond;
 }
 
-const profile = `/tmp/cdp-playtest-${process.pid}`;
-rmSync(profile, { recursive: true, force: true });
+const profile = mkdtempSync(join(tmpdir(), "cc-playtest-"));
 const chrome = spawn(CHROME, [
-  `--remote-debugging-port=${PORT}`,
+  "--remote-debugging-port=0", // Chrome chooses an exclusive port; never attach to another browser.
   `--user-data-dir=${profile}`,
   "--no-first-run",
   "--no-default-browser-check",
@@ -49,50 +84,95 @@ const chrome = spawn(CHROME, [
   "--disable-background-timer-throttling",
   "--disable-renderer-backgrounding",
   "--disable-backgrounding-occluded-windows",
+  ...(HEADLESS ? ["--headless"] : []),
   "about:blank",
 ], { stdio: "ignore" });
+let startupError;
+chrome.on("error", (error) => { startupError = error; });
+chrome.on("exit", (code, signal) => {
+  startupError = new Error(`Chrome exited (${code ?? signal})`);
+  rejectPending(startupError);
+});
 
 let ws;
 let msgId = 0;
 const pending = new Map();
+const resources = new Map();
 let mobile = false;
+function rejectPending(error) {
+  for (const { reject, timer } of pending.values()) { clearTimeout(timer); reject(error); }
+  pending.clear();
+}
 
 async function connect() {
+  let lastError;
   for (let i = 0; i < 50; i++) {
+    if (startupError) throw startupError;
     try {
-      const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+      const port = Number(readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
+      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json();
       const page = list.find((t) => t.type === "page");
       if (page) {
         ws = new WebSocket(page.webSocketDebuggerUrl);
-        await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Chrome connection timed out")), 5000);
+          ws.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+          ws.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Chrome connection failed")); }, { once: true });
+        });
+        ws.addEventListener("close", () => rejectPending(new Error("Chrome connection closed")));
+        ws.addEventListener("error", () => rejectPending(new Error("Chrome connection failed")));
         ws.addEventListener("message", (ev) => {
           const m = JSON.parse(ev.data);
           if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) {
-            const text = JSON.stringify(m.params).slice(0, 300);
-            if (!/Failed to load resource/.test(text)) {
-              console.log("  FAIL page error:", text);
-              failures++;
+            const text = m.params.exceptionDetails?.exception?.description ?? m.params.exceptionDetails?.text ??
+              m.params.args?.map((a) => a.value ?? a.description ?? "").join(" ") ?? "browser error";
+            // Network events below cover failed page assets. API failures can
+            // be intentional in the offline/race suite; its assertions check them.
+            if (m.method === "Runtime.exceptionThrown" || !text.startsWith("Failed to load resource:")) {
+              check(false, `page error: ${text.slice(0, 1000)}`);
             }
           }
+          if (m.method === "Network.requestWillBeSent") {
+            const { requestId, type, request } = m.params;
+            if (new URL(request.url).origin === origin.origin && ["Document", "Script", "Stylesheet"].includes(type)) resources.set(requestId, request.url);
+          }
+          if (m.method === "Network.responseReceived" && resources.has(m.params.requestId) && m.params.response.status >= 400) {
+            check(false, `resource HTTP ${m.params.response.status}: ${new URL(resources.get(m.params.requestId)).pathname}`);
+          }
+          if (m.method === "Network.loadingFailed" && resources.has(m.params.requestId) && !m.params.canceled) {
+            check(false, `resource failed: ${new URL(resources.get(m.params.requestId)).pathname} (${m.params.errorText})`);
+          }
           if (m.id && pending.has(m.id)) {
-            pending.get(m.id)(m);
+            const { resolve, reject, timer, method } = pending.get(m.id);
+            clearTimeout(timer);
+            if (m.error) reject(new Error(`${method}: ${m.error.message}`));
+            else resolve(m);
             pending.delete(m.id);
           }
         });
         return;
       }
-    } catch {}
+    } catch (error) {
+      lastError = error;
+      try { ws?.close(); } catch {}
+      ws = undefined;
+    }
     await sleep(200);
   }
-  throw new Error("could not reach Chrome");
+  throw new Error(`Could not reach Chrome: ${lastError?.message ?? "no debugging endpoint"}`);
 }
 function send(method, params = {}) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Chrome is not connected"));
   const id = ++msgId;
-  ws.send(JSON.stringify({ id, method, params }));
-  return new Promise((r) => pending.set(id, r));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, 10000);
+    pending.set(id, { resolve, reject, timer, method });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
 }
 async function evaluate(expression) {
   const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text);
   return r.result?.result?.value;
 }
 async function game() {
@@ -916,6 +996,7 @@ async function main() {
   await connect();
   await send("Page.enable");
   await send("Runtime.enable");
+  await send("Network.enable");
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   for (const s of SUITES) {
     if (s === "combat") await combatSuite();
@@ -927,18 +1008,37 @@ async function main() {
     else if (s === "groups") await groupLayoutSuite();
     else if (s === "legacy") await legacySuite();
     else if (s === "roam") await roamSuite();
+    completedSuites.push(s);
   }
-  console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
+  log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }
 
-main()
+let runTimer;
+Promise.race([main(), new Promise((_, reject) => { runTimer = setTimeout(() => reject(new Error("Browser checks exceeded 8 minutes")), 480000); })])
   .catch((e) => {
-    console.error(e);
-    failures++;
+    check(false, e.stack ?? String(e));
   })
-  .finally(() => {
+  .finally(async () => {
+    clearTimeout(runTimer);
+    if (failures && ws?.readyState === WebSocket.OPEN) {
+      try { await shot("failure"); } catch { log("Could not capture the final browser frame."); }
+    }
+    rejectPending(new Error("Browser checks finished"));
     ws?.close();
-    chrome.kill();
-    setTimeout(() => rmSync(profile, { recursive: true, force: true }), 500);
-    setTimeout(() => process.exit(failures ? 1 : 0), 700);
+    if (chrome.pid && chrome.exitCode === null && chrome.signalCode === null) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { chrome.kill("SIGKILL"); resolve(); }, 3000);
+        chrome.once("exit", () => { clearTimeout(timer); resolve(); });
+        chrome.kill();
+      });
+    }
+    try { rmSync(profile, { recursive: true, force: true }); }
+    catch { check(false, "Could not remove the isolated browser profile."); }
+    try {
+      writeFileSync(join(OUT, "results.json"), JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), revision,
+        worktreeDirty, baseUrl: BASE, headless: HEADLESS, platform: process.platform, node: process.version,
+        suites: SUITES, completedSuites, failures, results }, null, 2) + "\n");
+      writeFileSync(join(OUT, "checks.log"), output.join("\n") + "\n");
+    } catch { check(false, "Could not write the browser verification artifacts."); }
+    process.exit(failures ? 1 : 0);
   });
