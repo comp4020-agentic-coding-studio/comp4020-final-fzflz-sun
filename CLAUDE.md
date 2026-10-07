@@ -159,6 +159,9 @@ Chrome is detected on macOS/Linux/Windows, or overridden with `CHROME`.
 Browser screenshots and a dated result with revision are saved to
 `.local/checks/browser/` (`SHOTS` overrides it); CI retains them for 14 days.
 Report what was actually run, and say plainly what wasn't verified.
+In browser save checks, derive the expected cleared camps from the saved roster.
+Winning one encounter against a split skirmisher does not clear its whole camp;
+assert saved kills, wins and camp progress separately.
 
 ## Process
 

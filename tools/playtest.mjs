@@ -18,6 +18,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clearedAreas } from "../src/save.ts";
+import { AREAS } from "../src/world.ts";
 
 const args = process.argv.slice(2);
 const KNOWN_SUITES = new Set(["combat", "save", "viewports", "prodguard", "monsters", "groups", "legacy", "roam", "race"]);
@@ -476,7 +478,11 @@ async function saveSuite(viewport = { w: 1280, h: 800, mobile: false }, label = 
   await sleep(500);
   const back = await waitText("#panel", /Welcome back/);
   check(/Welcome back/.test(back) && /Run #1/.test(back), "after reload the start screen shows the saved run");
-  check(/Camps cleared: [1-9]/.test(back) || !/^west|^south/.test(killed.join()), "it reports the cleared camp");
+  // One split skirmisher can die while the rest of its camp is still alive.
+  // Check the saved roster's actual progress, not an assumed whole-camp win.
+  const cleared = clearedAreas(stored);
+  check(back.includes(`Camps cleared: ${cleared.length}/${AREAS.length}`), `return screen reports the saved camp count (${cleared.length}/${AREAS.length})`);
+  check(back.includes(`kills ${stored.stats.kills}`) && back.includes(`fights won ${stored.stats.wins}`), "return screen reports saved kills and wins separately from cleared camps");
   await shot(`s03_restore_${label}`);
   await tapEl("#go");
   g = await waitFor((s) => s.run === "playing" && !s.screen);

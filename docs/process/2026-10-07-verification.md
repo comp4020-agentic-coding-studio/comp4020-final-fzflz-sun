@@ -47,6 +47,15 @@ Chrome uses its own temporary profile and debugging port, with bounded request
 and run timeouts. These failure paths were reviewed in code; disk failure and
 forced browser crashes were not independently injected in this stage.
 
+The [subsequent PR run 37577236657](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/37577236657)
+failed one old browser assertion: killing `west-1` was assumed to clear the whole
+West camp. The saved run correctly retained `west-2` and reported zero cleared
+camps. The harness now compares the return screen to the saved roster's actual
+camp count and checks kills/wins separately. This correction is also recorded in
+`CLAUDE.md`. The [PR check history](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/pull/1/checks)
+records verification of the correction; the earlier green run does not erase
+this observed failure.
+
 The author has not supplied new enjoyment judgments or independent player
 observations for this change. The first-play and art sheets remain templates.
 This is implementation evidence, not a new release record; the workflow's main
