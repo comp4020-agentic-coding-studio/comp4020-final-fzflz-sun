@@ -1,8 +1,8 @@
-// Browser-driven playtest: opens a real (windowed) Chrome over the DevTools
+// Browser-driven playtest: opens an isolated Chrome over the DevTools
 // protocol, plays through actual key / mouse / touch input, and checks the
 // state the page exposes on window.__game.
 //
-//   node tools/playtest.mjs [baseUrl] [--suite=combat,save,viewports]
+//   node tools/playtest.mjs [baseUrl] [--suite=combat,save,viewports] [--headless]
 //
 // combat    rules, layout and camera in dev-only ?fight= encounters (dev server only)
 // save      stranger -> start -> real fight -> saved -> reload -> restored; two visitors isolated
@@ -15,14 +15,50 @@
 // race      New run while the final checkpoint is slow or can't be sent (throttled / offline network)
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { clearedAreas } from "../src/save.ts";
+import { AREAS } from "../src/world.ts";
 
 const args = process.argv.slice(2);
+const KNOWN_SUITES = new Set(["combat", "save", "viewports", "prodguard", "monsters", "groups", "legacy", "roam", "race"]);
+if (args.includes("--help")) {
+  console.log("node tools/playtest.mjs [baseUrl] [--suite=" + [...KNOWN_SUITES].join(",") + "] [--headless]\nCHROME overrides the executable; SHOTS overrides the artifact directory.");
+  process.exit(0);
+}
+if (args.some((a) => a.startsWith("--") && a !== "--headless" && !a.startsWith("--suite=")) || args.filter((a) => !a.startsWith("--")).length > 1) {
+  console.error("Unknown argument. See --help.");
+  process.exit(1);
+}
 const BASE = (args.find((a) => !a.startsWith("--")) ?? "http://localhost:8080/").replace(/\/?$/, "/");
 const SUITES = (args.find((a) => a.startsWith("--suite="))?.slice(8) ?? "combat,save,viewports").split(",");
-const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PORT = 9333;
-const OUT = process.env.SHOTS ?? "/tmp/shots";
+if (SUITES.some((s) => !KNOWN_SUITES.has(s)) || new Set(SUITES).size !== SUITES.length) {
+  console.error("Empty, unknown or repeated suite. See --help.");
+  process.exit(1);
+}
+const origin = new URL(BASE);
+if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash) {
+  throw new Error("Use an HTTP(S) base URL without credentials, query or fragment.");
+}
+const CHROME = process.env.CHROME ?? [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+  join(process.env.ProgramFiles ?? "C:/Program Files", "Google/Chrome/Application/chrome.exe"),
+].find(existsSync);
+if (!CHROME) throw new Error("Chrome was not found; set CHROME to its executable.");
+const HEADLESS = args.includes("--headless") || process.env.CI === "true";
+const OUT = process.env.SHOTS ?? ".local/checks/browser";
+const startedAt = new Date().toISOString();
+const completedSuites = [];
+const results = [];
+const output = [];
+let revision = "unknown";
+let worktreeDirty = true;
+try {
+  revision = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  worktreeDirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim().length > 0;
+} catch {}
 // keep in step with src/formation.ts
 const TRASH_BOX = { left: -40, right: 40, top: -70, bottom: 18 };
 const ELITE_BOX = { left: -48, right: 48, top: -96, bottom: 26 };
@@ -32,16 +68,17 @@ mkdirSync(OUT, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
+function log(msg) { console.log(msg); output.push(msg); }
 function check(cond, msg) {
-  console.log(`${cond ? "  ok  " : "  FAIL"} ${msg}`);
+  log(`${cond ? "  ok  " : "  FAIL"} ${msg}`);
+  results.push({ passed: !!cond, message: msg });
   if (!cond) failures++;
   return cond;
 }
 
-const profile = `/tmp/cdp-playtest-${process.pid}`;
-rmSync(profile, { recursive: true, force: true });
+const profile = mkdtempSync(join(tmpdir(), "cc-playtest-"));
 const chrome = spawn(CHROME, [
-  `--remote-debugging-port=${PORT}`,
+  "--remote-debugging-port=0", // Chrome chooses an exclusive port; never attach to another browser.
   `--user-data-dir=${profile}`,
   "--no-first-run",
   "--no-default-browser-check",
@@ -49,50 +86,101 @@ const chrome = spawn(CHROME, [
   "--disable-background-timer-throttling",
   "--disable-renderer-backgrounding",
   "--disable-backgrounding-occluded-windows",
+  ...(HEADLESS ? ["--headless"] : []),
   "about:blank",
-], { stdio: "ignore" });
+], { stdio: ["ignore", "ignore", "pipe"] });
+let chromeDiagnostics = "";
+chrome.stderr.on("data", (chunk) => {
+  // Keep a bounded startup/render diagnostic, never persist the debugging endpoint.
+  chromeDiagnostics = (chromeDiagnostics + chunk.toString()).slice(-65536);
+});
+let startupError;
+chrome.on("error", (error) => { startupError = error; });
+chrome.on("exit", (code, signal) => {
+  startupError = new Error(`Chrome exited (${code ?? signal})`);
+  rejectPending(startupError);
+});
 
 let ws;
 let msgId = 0;
 const pending = new Map();
+const resources = new Map();
 let mobile = false;
+function rejectPending(error) {
+  for (const { reject, timer } of pending.values()) { clearTimeout(timer); reject(error); }
+  pending.clear();
+}
 
 async function connect() {
-  for (let i = 0; i < 50; i++) {
+  let lastError;
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    if (startupError) throw startupError;
     try {
-      const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+      const port = Number(readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0]);
+      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json();
       const page = list.find((t) => t.type === "page");
       if (page) {
         ws = new WebSocket(page.webSocketDebuggerUrl);
-        await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Chrome connection timed out")), 5000);
+          ws.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+          ws.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Chrome connection failed")); }, { once: true });
+        });
+        ws.addEventListener("close", () => rejectPending(new Error("Chrome connection closed")));
+        ws.addEventListener("error", () => rejectPending(new Error("Chrome connection failed")));
         ws.addEventListener("message", (ev) => {
           const m = JSON.parse(ev.data);
           if (m.method === "Runtime.exceptionThrown" || (m.method === "Runtime.consoleAPICalled" && m.params.type === "error")) {
-            const text = JSON.stringify(m.params).slice(0, 300);
-            if (!/Failed to load resource/.test(text)) {
-              console.log("  FAIL page error:", text);
-              failures++;
+            const text = m.params.exceptionDetails?.exception?.description ?? m.params.exceptionDetails?.text ??
+              m.params.args?.map((a) => a.value ?? a.description ?? "").join(" ") ?? "browser error";
+            // Network events below cover failed page assets. API failures can
+            // be intentional in the offline/race suite; its assertions check them.
+            if (m.method === "Runtime.exceptionThrown" || !text.startsWith("Failed to load resource:")) {
+              check(false, `page error: ${text.slice(0, 1000)}`);
             }
           }
+          if (m.method === "Network.requestWillBeSent") {
+            const { requestId, type, request } = m.params;
+            if (new URL(request.url).origin === origin.origin && ["Document", "Script", "Stylesheet"].includes(type)) resources.set(requestId, request.url);
+          }
+          if (m.method === "Network.responseReceived" && resources.has(m.params.requestId) && m.params.response.status >= 400) {
+            check(false, `resource HTTP ${m.params.response.status}: ${new URL(resources.get(m.params.requestId)).pathname}`);
+          }
+          if (m.method === "Network.loadingFailed" && resources.has(m.params.requestId) && !m.params.canceled) {
+            check(false, `resource failed: ${new URL(resources.get(m.params.requestId)).pathname} (${m.params.errorText})`);
+          }
           if (m.id && pending.has(m.id)) {
-            pending.get(m.id)(m);
+            const { resolve, reject, timer, method } = pending.get(m.id);
+            clearTimeout(timer);
+            if (m.error) reject(new Error(`${method}: ${m.error.message}`));
+            else resolve(m);
             pending.delete(m.id);
           }
         });
         return;
       }
-    } catch {}
+    } catch (error) {
+      lastError = error;
+      try { ws?.close(); } catch {}
+      ws = undefined;
+    }
     await sleep(200);
   }
-  throw new Error("could not reach Chrome");
+  throw new Error(`Could not reach Chrome within 45 seconds: ${lastError?.message ?? "no debugging endpoint"}; see chrome.log`);
 }
 function send(method, params = {}) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Chrome is not connected"));
   const id = ++msgId;
-  ws.send(JSON.stringify({ id, method, params }));
-  return new Promise((r) => pending.set(id, r));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, 10000);
+    pending.set(id, { resolve, reject, timer, method });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
 }
 async function evaluate(expression) {
   const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text);
   return r.result?.result?.value;
 }
 async function game() {
@@ -366,9 +454,11 @@ async function saveSuite(viewport = { w: 1280, h: 800, mobile: false }, label = 
   await shot(`s01_title_${label}`);
   await tapEl("#go");
   g = await waitFor((s) => s.run === "playing" && !s.screen, 6000);
-  check(!!g && g.runNumber === 1, "Start creates run #1 on the server");
+  if (!check(!!g && g.runNumber === 1, "Start creates run #1 on the server")) return;
   const pill = await waitText("#savePill", /Saved/);
   check(/Saved/.test(pill), `save status shows server confirmation (“${pill}”)`);
+  const initial = await waitApiState((a) => a.save?.runNumber === g.runNumber && a.save.outcome === "playing");
+  if (!check(!!initial, "server holds the newly started run")) return;
 
   const mapIds = (s) => new Set(s.enemies.filter((e) => e.spawnId).map((e) => e.spawnId));
   const beforeFight = mapIds(await game());
@@ -380,23 +470,32 @@ async function saveSuite(viewport = { w: 1280, h: 800, mobile: false }, label = 
   layoutChecks(g, `real fight ${label}`);
   await shot(`s02_fight_${label}`);
   g = await fightToEnd(true);
-  check(g.phase === null && g.run === "playing", `won the fight with taps only (HP ${g.hp})`);
-  const savedText = await waitText("#savePill", /Saved/, 8000);
-  check(/Saved/.test(savedText), "victory checkpoint confirmed by the server");
+  if (!check(g?.phase === null && g.run === "playing", `won the fight with taps only (HP ${g?.hp})`)) return;
   const afterWin = await game();
   const killed = [...beforeFight].filter((id) => !mapIds(afterWin).has(id));
   check(killed.length >= 1, `killed ${killed.join(", ")}`);
 
-  const api = await evaluate(`fetch("/api/save").then(r => r.json()).then(j => JSON.stringify(j))`);
-  const stored = JSON.parse(api).save;
-  check(stored.reason === "victory" && stored.player.hp === afterWin.hp, `server holds the victory checkpoint (HP ${stored.player.hp})`);
+  // A Saved pill can describe an earlier write, and a later legal checkpoint can
+  // replace reason= victory. Wait for this run's actual result on the server.
+  const confirmed = await waitApiState((a) => a.revision > initial.revision &&
+    a.save?.runId === initial.save.runId && a.save.player.hp === afterWin.hp &&
+    a.save.stats.wins === afterWin.stats.wins && a.save.stats.kills === afterWin.stats.kills &&
+    killed.every((id) => a.save.enemies[id] === 0));
+  if (!check(!!confirmed, "server confirms this run's victory, HP and killed enemies in a newer checkpoint")) return;
+  const stored = confirmed.save;
+  const savedText = await waitText("#savePill", /Saved/, 8000);
+  check(/Saved/.test(savedText), "save status shows confirmation after the verified victory");
   check(killed.every((id) => stored.enemies[id] === 0), "server records the killed enemies by stable id");
 
   await send("Page.reload");
   await sleep(500);
   const back = await waitText("#panel", /Welcome back/);
   check(/Welcome back/.test(back) && /Run #1/.test(back), "after reload the start screen shows the saved run");
-  check(/Camps cleared: [1-9]/.test(back) || !/^west|^south/.test(killed.join()), "it reports the cleared camp");
+  // One split skirmisher can die while the rest of its camp is still alive.
+  // Check the saved roster's actual progress, not an assumed whole-camp win.
+  const cleared = clearedAreas(stored);
+  check(back.includes(`Camps cleared: ${cleared.length}/${AREAS.length}`), `return screen reports the saved camp count (${cleared.length}/${AREAS.length})`);
+  check(back.includes(`kills ${stored.stats.kills}`) && back.includes(`fights won ${stored.stats.wins}`), "return screen reports saved kills and wins separately from cleared camps");
   await shot(`s03_restore_${label}`);
   await tapEl("#go");
   g = await waitFor((s) => s.run === "playing" && !s.screen);
@@ -431,8 +530,13 @@ async function viewportSuite() {
 
   console.log("\n# phone controls & a resize mid-fight");
   await setViewport(390, 844, true);
+  await sleep(200); // Navigation is recalculated by the next game frame.
   let g = await game();
-  check(!!g.pointer, `on the phone an edge pointer shows the way to the nearest camp (“${g.pointer?.text}”)`);
+  const nearest = g.enemies.filter((e) => e.spawnId).sort((a, b) =>
+    Math.hypot(a.x - g.player.x, a.y - g.player.y) - Math.hypot(b.x - g.player.x, b.y - g.player.y))[0];
+  const offScreen = nearest && !(nearest.sx > g.safe.x0 && nearest.sx < g.safe.x1 && nearest.sy > g.safe.y0 && nearest.sy < g.safe.y1);
+  const needsPointer = !!offScreen && g.run === "playing" && !g.phase && !g.screen;
+  check(!!g.pointer === needsPointer, `phone navigation matches the nearest enemy's visibility (${needsPointer ? "edge pointer" : "no pointer needed"})`);
   g = await walkIntoFight();
   g = await waitFor((s) => s.phase === "playerTurn", 8000);
   if (g) {
@@ -452,14 +556,30 @@ async function viewportSuite() {
     await shot("v02_resized");
     await setViewport(390, 844, true);
     await sleep(1200);
-    layoutChecks(await game(), "after resizing back to the phone");
+    g = await game();
+    layoutChecks(g, "after resizing back to the phone");
+    if (!check(g.phase === "playerTurn", "resizing preserves the player's active turn")) return;
+    const previousTurn = g.turn;
+    if (!check(await tapEl("#endTurn"), "End turn remains visible and tappable after resizing")) return;
+    g = await waitFor((s) => (s.phase === "playerTurn" && s.turn > previousTurn) || (s.phase === null && s.run === "dead" && s.hp === 0), 10000);
+    check(!!g, "End turn still responds to touch after both resizes");
     g = await fightToEnd(true);
-    check(g.phase === null, "finished the fight after the resizes");
+    check(g?.phase === null && (g.run === "playing" || (g.run === "dead" && g.hp === 0)),
+      `fight resolves correctly after the resizes (${g?.run === "dead" ? "defeat" : "victory"}, HP ${g?.hp})`);
   } else check(false, "phone: walked into a fight");
 }
 
 async function apiState() {
   return JSON.parse(await evaluate(`fetch("/api/save").then(r => r.json()).then(j => JSON.stringify(j))`));
+}
+async function waitApiState(predicate, ms = 8000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const state = await apiState();
+    if (predicate(state)) return state;
+    await sleep(100);
+  }
+  return null;
 }
 async function network(conditions) {
   await send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1, ...conditions });
@@ -916,6 +1036,7 @@ async function main() {
   await connect();
   await send("Page.enable");
   await send("Runtime.enable");
+  await send("Network.enable");
   await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   for (const s of SUITES) {
     if (s === "combat") await combatSuite();
@@ -927,18 +1048,38 @@ async function main() {
     else if (s === "groups") await groupLayoutSuite();
     else if (s === "legacy") await legacySuite();
     else if (s === "roam") await roamSuite();
+    completedSuites.push(s);
   }
-  console.log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
+  log(failures ? `\n${failures} check(s) FAILED` : "\nall browser checks passed");
 }
 
-main()
+let runTimer;
+Promise.race([main(), new Promise((_, reject) => { runTimer = setTimeout(() => reject(new Error("Browser checks exceeded 8 minutes")), 480000); })])
   .catch((e) => {
-    console.error(e);
-    failures++;
+    check(false, e.stack ?? String(e));
   })
-  .finally(() => {
+  .finally(async () => {
+    clearTimeout(runTimer);
+    if (failures && ws?.readyState === WebSocket.OPEN) {
+      try { await shot("failure"); } catch { log("Could not capture the final browser frame."); }
+    }
+    rejectPending(new Error("Browser checks finished"));
     ws?.close();
-    chrome.kill();
-    setTimeout(() => rmSync(profile, { recursive: true, force: true }), 500);
-    setTimeout(() => process.exit(failures ? 1 : 0), 700);
+    if (chrome.pid && chrome.exitCode === null && chrome.signalCode === null) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { chrome.kill("SIGKILL"); resolve(); }, 3000);
+        chrome.once("exit", () => { clearTimeout(timer); resolve(); });
+        chrome.kill();
+      });
+    }
+    try { rmSync(profile, { recursive: true, force: true }); }
+    catch { check(false, "Could not remove the isolated browser profile."); }
+    try {
+      writeFileSync(join(OUT, "results.json"), JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), revision,
+        worktreeDirty, baseUrl: BASE, headless: HEADLESS, platform: process.platform, node: process.version,
+        suites: SUITES, completedSuites, failures, results }, null, 2) + "\n");
+      writeFileSync(join(OUT, "checks.log"), output.join("\n") + "\n");
+      writeFileSync(join(OUT, "chrome.log"), chromeDiagnostics.replace(/ws:\/\/[^\s]+/g, "[debugging endpoint omitted]"));
+    } catch { check(false, "Could not write the browser verification artifacts."); }
+    process.exit(failures ? 1 : 0);
   });

@@ -141,3 +141,14 @@ Crit 9 makes the game multi-user and real-time. The map now has enough going
 on — six camps, packs, a reviving mage, a boss with a lair — that "what does
 another player see and affect" is a real question, not a formality. I
 haven't decided the answer yet, and that comes before any code.
+
+## Process tools added after the C8 release (7 October 2026)
+
+The [working checklist](docs/process/README.md) provides a short feature
+acceptance card, first-time-player observations and an art sample checklist.
+[Release records](docs/releases/README.md) tie checks and limitations to dated
+commits; the [3 October C8 record](docs/releases/2026-10-03-crit-8.md) is based on
+that session's actual checks, not a reconstruction of earlier development.
+The workflow now includes the production browser session and a page/asset,
+README and isolated-save check. These are regression checks; independent
+playtesting and enjoyment judgments still need real people.

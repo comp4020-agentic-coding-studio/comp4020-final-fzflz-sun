@@ -145,12 +145,43 @@ pnpm check:evidence
 ```
 
 For the production image: `docker build -t app . && docker run -p 8090:8080
---tmpfs /data app`, then `APP_URL=http://localhost:8090 pnpm check` and
-`PLAYTEST_CONTAINER=<name> node tools/playtest.mjs http://localhost:8090/ --suite=prodguard,save,viewports,race,legacy`.
+--tmpfs /data app`, then `APP_URL=http://localhost:8090 pnpm check`,
+`pnpm check:browser http://localhost:8090/` and
+`pnpm check:deploy -- http://localhost:8090/`.
+The browser and deploy checks run in CI against the production image before deployment.
+The deploy check also runs against Fly after deployment; it checks the page,
+referenced assets, full README and a checkpoint kept apart from a second guest.
+It cleans only its newly created test guests' saves. It does not prove a real
+browser fight or persistence across a Fly restart.
+For save races and legacy migration additionally run
+`PLAYTEST_CONTAINER=<name> node tools/playtest.mjs http://localhost:8090/ --suite=race,legacy`.
+Chrome is detected on macOS/Linux/Windows, or overridden with `CHROME`.
+Browser screenshots and a dated result with revision are saved to
+`.local/checks/browser/` (`SHOTS` overrides it); CI retains them for 14 days.
 Report what was actually run, and say plainly what wasn't verified.
+In browser save checks, derive the expected cleared camps from the saved roster.
+Winning one encounter against a split skirmisher does not clear its whole camp;
+assert saved kills, wins and camp progress separately.
+Wait for a newer server checkpoint matching the run and result, not just an
+already-visible Saved pill or one checkpoint reason. Account for the nearest
+enemy's visibility when checking navigation, and report legitimate defeat in
+resize tests that continue with damaged HP. Keep browser startup and request
+waits bounded; retain diagnostics rather than retrying failures without review.
 
 ## Process
 
+- Start each substantial feature with the short acceptance card in
+  [the working process](docs/process/README.md): player problem, scope,
+  rules and save impact, observable acceptance scenarios. Close it with
+  actual checks, author corrections and real commits. Keep unfinished work
+  labelled pending; do not backfill invented decisions or test results.
+- Separate agent-driven regression checks from independent player feedback.
+  Use [the playtest sheet](docs/process/playtest.md) for first-time players;
+  leave observations empty until someone actually plays.
+- Keep [release records](docs/releases/README.md) dated and tied to the
+  verified commit and workflow. Preserve old crit tags after their cutoff.
+- Before producing art in bulk, use [the art sample checklist](docs/process/art.md)
+  in a real fight and record each asset's source, licence and export settings.
 - Commit real work as it happens; never rewrite or backdate history.
 - `spec/invariants.test.ts` and `spec/global-setup.ts` are the course's: don't
   edit them. Add checks as new `spec/*.test.ts` files.
