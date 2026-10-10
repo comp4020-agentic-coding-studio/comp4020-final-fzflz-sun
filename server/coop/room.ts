@@ -5,6 +5,7 @@
 // on its own; server/coop/ws.ts drives it from real connections and
 // server/coop/store.ts persists its snapshots.
 import type { CoopEnemyView, CoopPlayerView } from "../../src/coop-protocol.ts";
+import { type EncounterPlayer, type Explorer, selectRoster } from "../../src/encounter.ts";
 import { type Pt, type RoamEvent, type RoamPlayer, type RoamUnit, roamTick } from "../../src/roam.ts";
 import {
   ENEMY_SPAWNS,
@@ -27,6 +28,7 @@ export interface RoomEnemy extends RoamUnit {
   role: Role;
   hp: number;
   maxHp: number;
+  fightId: string | null;
 }
 
 export interface RoomPlayer {
@@ -39,6 +41,22 @@ export interface RoomPlayer {
   dir: Pt;
   online: boolean;
   lastSeen: number;
+  /** the fight this player is in, fixed for its duration; null while free exploring */
+  fightId: string | null;
+}
+
+/**
+ * A formed fight's fixed membership: set once when it triggers (src/encounter.ts's
+ * selectRoster), never changed by later movement, zoom or window size. Combat
+ * itself (phase 3) resolves and clears it; for now a room can form fights but
+ * has no engine yet to end them.
+ */
+export interface RoomFight {
+  id: string;
+  anchorId: string;
+  playerIds: string[];
+  enemyKeys: string[];
+  startedAt: number;
 }
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
@@ -74,6 +92,7 @@ export function makeRoomEnemies(): RoomEnemy[] {
       targetId: null,
       hp: spawn.maxHp,
       maxHp: spawn.maxHp,
+      fightId: null,
     };
   });
 }
@@ -94,6 +113,8 @@ export class CoopRoom {
   readonly createdAt: number;
   enemies: RoomEnemy[];
   players = new Map<string, RoomPlayer>();
+  fights = new Map<string, RoomFight>();
+  private nextFightN = 1;
 
   constructor(code: string, now: number, enemies: RoomEnemy[] = makeRoomEnemies()) {
     this.code = code;
@@ -110,7 +131,7 @@ export class CoopRoom {
       existing.name = name || existing.name;
       return existing;
     }
-    const p: RoomPlayer = { id, name, color, pos: { ...PLAYER_START }, hp: PLAYER_MAX_HP, dir: { x: 0, y: 0 }, online: true, lastSeen: now };
+    const p: RoomPlayer = { id, name, color, pos: { ...PLAYER_START }, hp: PLAYER_MAX_HP, dir: { x: 0, y: 0 }, online: true, lastSeen: now, fightId: null };
     this.players.set(id, p);
     return p;
   }
@@ -123,34 +144,80 @@ export class CoopRoom {
     if (!online) p.dir = { x: 0, y: 0 };
   }
 
-  /** Movement intent, not a position: the server is the one that integrates it. */
+  /** Movement intent, not a position: the server is the one that integrates it. A fighting player can't move the map. */
   setIntent(id: string, dx: number, dy: number, now: number) {
     const p = this.players.get(id);
-    if (!p || !p.online) return;
+    if (!p || !p.online || p.fightId) return;
     const len = Math.hypot(dx, dy);
     p.dir = len > 1 ? { x: dx / len, y: dy / len } : { x: dx, y: dy };
     p.lastSeen = now;
   }
 
-  /** Advances every online player by at most PLAYER_SPEED * dt, clamped to the map, then ticks enemy roam. */
+  /** Advances every free, online player by at most PLAYER_SPEED * dt, clamped to the map, then ticks enemy roam. */
   tick(now: number, dt: number, rnd: () => number): RoamEvent[] {
     for (const p of this.players.values()) {
-      if (!p.online) continue;
+      if (!p.online || p.fightId) continue;
       const len = Math.hypot(p.dir.x, p.dir.y);
       if (len > 0) {
         p.pos.x = clamp(p.pos.x + (p.dir.x / len) * PLAYER_SPEED * dt, PLAYER_EDGE, WORLD_WIDTH - PLAYER_EDGE);
         p.pos.y = clamp(p.pos.y + (p.dir.y / len) * PLAYER_SPEED * dt, PLAYER_EDGE, WORLD_HEIGHT - PLAYER_EDGE);
       }
     }
-    const roamPlayers: RoamPlayer[] = [...this.players.values()].filter((p) => p.online).map((p) => ({ id: p.id, pos: p.pos }));
-    return roamTick(this.enemies, { now, dt, players: roamPlayers, rnd, world: { w: WORLD_WIDTH, h: WORLD_HEIGHT } });
+    // a fighting player isn't part of the shared explorable world: other
+    // enemies can't notice or chase them until their fight ends
+    const roamPlayers: RoamPlayer[] = [...this.players.values()].filter((p) => p.online && !p.fightId).map((p) => ({ id: p.id, pos: p.pos }));
+    const events = roamTick(this.enemies, { now, dt, players: roamPlayers, rnd, world: { w: WORLD_WIDTH, h: WORLD_HEIGHT } });
+    this.formFights(now);
+    return events;
+  }
+
+  /**
+   * Checks every free, online player and every not-already-engaged enemy for
+   * a trigger (src/encounter.ts's selectRoster), forming as many fights as
+   * actually trigger this tick. A fight's roster is fixed the instant it
+   * forms: those enemies become "engaged" (roamTick already leaves engaged
+   * units alone) and those players stop moving and stop being eligible for
+   * another fight, so the loop below can never form two fights over the same
+   * enemy or player.
+   */
+  formFights(now: number): RoomFight[] {
+    const formed: RoomFight[] = [];
+    for (;;) {
+      const explorers: Explorer<RoomEnemy>[] = this.enemies
+        .filter((e) => e.alive && e.state !== "engaged")
+        .map((e) => ({
+          ref: e, key: e.key, alive: e.alive, state: e.state, x: e.pos.x, y: e.pos.y,
+          group: e.group, groupKind: e.groupKind, aggroRange: e.aggroRange, engageRange: e.engageRange, targetId: e.targetId,
+        }));
+      const candidates: EncounterPlayer[] = [...this.players.values()]
+        .filter((p) => p.online)
+        .map((p) => ({ id: p.id, x: p.pos.x, y: p.pos.y, alive: p.hp > 0, busy: !!p.fightId }));
+      const result = selectRoster(explorers, candidates);
+      if (!result) break;
+      const id = `f${this.nextFightN++}`;
+      const fight: RoomFight = { id, anchorId: result.anchorId, playerIds: result.playerIds, enemyKeys: result.enemies.map((e) => e.key), startedAt: now };
+      this.fights.set(id, fight);
+      for (const e of result.enemies) {
+        e.state = "engaged";
+        e.fightId = id;
+      }
+      for (const pid of result.playerIds) {
+        const p = this.players.get(pid)!;
+        p.fightId = id;
+        p.dir = { x: 0, y: 0 };
+      }
+      formed.push(fight);
+    }
+    return formed;
   }
 
   snapshot(now: number): RoomSnapshot {
     return {
       t: now,
-      players: [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, x: p.pos.x, y: p.pos.y, hp: p.hp, online: p.online })),
-      enemies: this.enemies.filter((e) => e.alive).map((e) => ({ id: e.key, role: e.role, tier: e.tier, x: e.pos.x, y: e.pos.y, hp: e.hp, maxHp: e.maxHp, state: e.state })),
+      players: [...this.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color, x: p.pos.x, y: p.pos.y, hp: p.hp, online: p.online, fightId: p.fightId })),
+      enemies: this.enemies
+        .filter((e) => e.alive)
+        .map((e) => ({ id: e.key, role: e.role, tier: e.tier, x: e.pos.x, y: e.pos.y, hp: e.hp, maxHp: e.maxHp, state: e.state, fightId: e.fightId })),
     };
   }
 }

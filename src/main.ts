@@ -629,7 +629,7 @@ function explorers(): Explorer<Enemy>[] {
     .filter((e) => e.exists())
     .map((e) => ({
       ref: e, key: String(e.enemyId), alive: true, state: e.state, x: e.pos.x, y: e.pos.y,
-      group: e.group, groupKind: e.groupKind, aggroRange: e.aggroRange, engageRange: e.engageRange,
+      group: e.group, groupKind: e.groupKind, aggroRange: e.aggroRange, engageRange: e.engageRange, targetId: e.targetId,
     }));
 }
 
@@ -667,8 +667,9 @@ function updateExploration() {
 // ---------- encounter flow ----------
 
 function tryTriggerEncounter(now: number) {
-  const roster = selectRoster(explorers(), player.pos);
-  if (!roster) return;
+  const result = selectRoster(explorers(), [{ id: "solo", x: player.pos.x, y: player.pos.y, alive: true, busy: false }]);
+  if (!result) return;
+  const roster = result.enemies;
 
   // The pre-fight checkpoint: closing the tab mid-fight comes back to here.
   if (run) run.stats.fights++;

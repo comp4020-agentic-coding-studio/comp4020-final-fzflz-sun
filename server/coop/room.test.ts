@@ -91,7 +91,9 @@ describe("CoopRoom: shared enemies", () => {
     const room = new CoopRoom("ABC123", 0);
     const west1 = room.enemies.find((e) => e.key === "west-1")!;
     room.addPlayer("far", "Far", "#fff", 0).pos = { x: west1.spawn.x + 5000, y: west1.spawn.y };
-    room.addPlayer("near", "Near", "#fff", 0).pos = { x: west1.spawn.x - 30, y: west1.spawn.y };
+    // inside aggroRange (210) so it notices, outside engageRange (40) so it
+    // chases without also instantly triggering a fight this same tick
+    room.addPlayer("near", "Near", "#fff", 0).pos = { x: west1.spawn.x - 100, y: west1.spawn.y };
     room.tick(0, 1 / 30, rng(2));
     expect(west1.state).toBe("chasing");
     expect(west1.targetId).toBe("near");
@@ -104,5 +106,86 @@ describe("CoopRoom: shared enemies", () => {
     expect(snap.players).toHaveLength(1);
     expect(snap.players[0]).toMatchObject({ id: "p1", name: "Ash", x: PLAYER_START.x, y: PLAYER_START.y });
     expect(snap.enemies.length).toBe(room.enemies.length);
+  });
+});
+
+describe("CoopRoom: fights form and freeze membership", () => {
+  /** Force an enemy already chasing `playerId`, right at its own doorstep. */
+  function putInEngageRange(room: CoopRoom, key: string, playerId: string) {
+    const e = room.enemies.find((x) => x.key === key)!;
+    const p = room.players.get(playerId)!;
+    e.state = "chasing";
+    e.targetId = playerId;
+    e.pos = { x: p.pos.x + e.engageRange - 1, y: p.pos.y };
+    return e;
+  }
+
+  it("a trigger forms a fight that freezes the enemy and the player", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    const e = putInEngageRange(room, "west-1", "p1");
+    const formed = room.formFights(0);
+    expect(formed).toHaveLength(1);
+    expect(e.state).toBe("engaged");
+    expect(e.fightId).toBe(formed[0].id);
+    const p = room.players.get("p1")!;
+    expect(p.fightId).toBe(formed[0].id);
+    // a fighting player can't move the shared map anymore
+    room.setIntent("p1", 1, 0, 1);
+    room.tick(1, 1, rng(1));
+    expect(p.pos).toEqual(PLAYER_START);
+  });
+
+  it("a free teammate within PLAYER_JOIN_RADIUS joins; a far one stays free to keep exploring", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    const near = room.addPlayer("near", "Birch", "#ff8a65", 0);
+    near.pos = { x: PLAYER_START.x + 50, y: PLAYER_START.y };
+    const far = room.addPlayer("far", "Cove", "#7fd97f", 0);
+    far.pos = { x: PLAYER_START.x + 5000, y: PLAYER_START.y };
+    putInEngageRange(room, "west-1", "p1");
+    const [fight] = room.formFights(0);
+    expect(fight.playerIds.sort()).toEqual(["near", "p1"].sort());
+    expect(near.fightId).toBe(fight.id);
+    expect(far.fightId).toBeNull();
+    // the far player is still free to move
+    room.setIntent("far", 1, 0, 1);
+    room.tick(1, 1, rng(1));
+    expect(far.pos.x).not.toBe(PLAYER_START.x + 5000);
+  });
+
+  it("two players triggering two unrelated, far-apart enemies form two separate fights in one tick", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0).pos = { x: 300, y: 300 };
+    room.addPlayer("p2", "Birch", "#ff8a65", 0).pos = { x: 2000, y: 1000 };
+    putInEngageRange(room, "west-1", "p1");
+    putInEngageRange(room, "lair-boss", "p2");
+    const formed = room.formFights(0);
+    expect(formed).toHaveLength(2);
+    const byAnchor = new Map(formed.map((f) => [f.anchorId, f]));
+    expect(byAnchor.get("p1")!.enemyKeys).toContain("west-1");
+    expect(byAnchor.get("p2")!.enemyKeys).toContain("lair-boss");
+  });
+
+  it("an enemy already engaged in one fight is never pulled into another", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0).pos = { x: 300, y: 300 };
+    const e = putInEngageRange(room, "west-1", "p1");
+    const [first] = room.formFights(0);
+    expect(e.fightId).toBe(first.id);
+    // nothing new triggers: a second pass forms no further fights
+    expect(room.formFights(1)).toHaveLength(0);
+  });
+
+  it("a busy player's fight never changes once formed, even as others move nearby later", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    putInEngageRange(room, "west-1", "p1");
+    const [fight] = room.formFights(0);
+    const late = room.addPlayer("late", "Cove", "#7fd97f", 10);
+    late.pos = { x: PLAYER_START.x + 10, y: PLAYER_START.y }; // arrives right next to the fight, after it formed
+    room.formFights(10);
+    expect(late.fightId).toBeNull();
+    expect(room.fights.get(fight.id)!.playerIds).toEqual(fight.playerIds);
   });
 });

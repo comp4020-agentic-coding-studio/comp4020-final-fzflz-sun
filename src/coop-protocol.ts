@@ -10,6 +10,8 @@ export interface CoopPlayerView {
   y: number;
   hp: number;
   online: boolean;
+  /** the fight this player is currently in, or null while free exploring */
+  fightId: string | null;
 }
 
 export interface CoopEnemyView {
@@ -21,6 +23,7 @@ export interface CoopEnemyView {
   hp: number;
   maxHp: number;
   state: string;
+  fightId: string | null;
 }
 
 export interface CoopHelloMsg {

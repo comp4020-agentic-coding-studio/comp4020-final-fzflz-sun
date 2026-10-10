@@ -170,8 +170,9 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     const v = ensurePlayer(p.id, p.name, p.color);
     v.body.pos = k.vec2(p.x, p.y);
     v.label.pos = k.vec2(p.x, p.y - 28);
-    v.body.opacity = p.online ? 1 : 0.3;
-    v.label.text = p.online ? p.name : `${p.name} (away)`;
+    v.body.opacity = p.online ? (p.fightId ? 0.6 : 1) : 0.3;
+    const tag = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
+    v.label.text = `${p.name}${tag}`;
   }
   for (const [id, v] of players) {
     if (!seenP.has(id)) {
@@ -187,7 +188,8 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     const v = ensureEnemy(e.id, e.role, e.tier);
     v.body.pos = k.vec2(e.x, e.y);
     v.hpLabel.pos = k.vec2(e.x, e.y - (ROLE_SIZE[e.role] ?? 24) / 2 - 10);
-    v.hpLabel.text = `${e.hp}`;
+    v.hpLabel.text = e.fightId ? `${e.hp} ⚔` : `${e.hp}`;
+    v.body.opacity = e.fightId ? 0.5 : 1; // combat itself (phase 3) will replace this with the real fight screen
   }
   for (const [id, v] of enemies) {
     if (!seenE.has(id)) {
@@ -202,7 +204,8 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
   ui.roster.textContent = "";
   for (const p of [...(me ? [me] : []), ...others]) {
     const span = document.createElement("span");
-    span.textContent = p.id === selfId ? `${p.name} (you)` : p.online ? p.name : `${p.name} (away)`;
+    const status = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
+    span.textContent = p.id === selfId ? `${p.name} (you)${status}` : `${p.name}${status}`;
     span.style.borderColor = p.online ? p.color : "#4a4a52";
     ui.roster.appendChild(span);
   }
