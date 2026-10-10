@@ -2,8 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import type { CoopClientMsg, CoopHelloMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
+import type { CoopClientMsg, CoopFightEndedMsg, CoopHelloMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
 import { HttpError, json, parseCookies, readBody } from "../http.ts";
+import { FightSession, type FightAction } from "./fight-session.ts";
 import { CoopRoom, MEMBER_COLORS, type RoomEnemy } from "./room.ts";
 import { openCoopStore, type CoopStore } from "./store.ts";
 
@@ -36,7 +37,7 @@ function cleanName(raw: unknown, fallback: string): string {
 
 interface PersistedRoom {
   players: { id: string; x: number; y: number; hp: number }[];
-  enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number }[];
+  enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number; phase: number }[];
 }
 
 export class CoopServer {
@@ -44,6 +45,8 @@ export class CoopServer {
   private rooms = new Map<string, CoopRoom>();
   private sockets = new Map<string, Set<{ ws: WebSocket; playerId: string }>>();
   private lastSaved = new Map<string, number>();
+  /** keyed by `${roomCode}:${fightId}`, since a RoomFight's id is only unique within its own room. */
+  private sessions = new Map<string, FightSession>();
   private timer: ReturnType<typeof setInterval>;
 
   constructor(dataDir: string) {
@@ -184,6 +187,17 @@ export class CoopServer {
     };
     ws.send(JSON.stringify(hello));
 
+    // reconnecting (or first connecting) mid-fight: catch this socket up immediately
+    const fightId = room.players.get(playerId)?.fightId;
+    if (fightId) {
+      const session = this.sessions.get(sessionKey(room.code, fightId));
+      if (session) {
+        this.sendTo(room, playerId, session.fightView());
+        const hand = session.handView(playerId);
+        if (hand) this.sendTo(room, playerId, hand);
+      }
+    }
+
     ws.on("message", (raw) => {
       let msg: unknown;
       try {
@@ -196,6 +210,10 @@ export class CoopServer {
         const dx = Math.max(-1, Math.min(1, m.dx));
         const dy = Math.max(-1, Math.min(1, m.dy));
         room.setIntent(playerId, dx, dy, Date.now());
+        return;
+      }
+      if ((m.type === "playCard" || m.type === "endTurn" || m.type === "flee") && typeof m.seq === "number") {
+        this.handleFightAction(room, playerId, m.seq, msg as { type: string } & Record<string, unknown>);
       }
     });
 
@@ -208,6 +226,59 @@ export class CoopServer {
     ws.on("error", onClose);
   }
 
+  private handleFightAction(room: CoopRoom, playerId: string, seq: number, raw: { type: string } & Record<string, unknown>) {
+    const fightId = room.players.get(playerId)?.fightId;
+    if (!fightId) return this.sendTo(room, playerId, { type: "actionError", error: "you're not in a fight right now" });
+    const session = this.sessions.get(sessionKey(room.code, fightId));
+    if (!session) return this.sendTo(room, playerId, { type: "actionError", error: "that fight no longer exists" });
+
+    let action: FightAction;
+    if (raw.type === "playCard" && typeof raw.cardInstanceId === "string") {
+      action = { type: "playCard", cardInstanceId: raw.cardInstanceId, targetKey: typeof raw.targetKey === "string" ? raw.targetKey : undefined };
+    } else if (raw.type === "endTurn") {
+      action = { type: "endTurn" };
+    } else if (raw.type === "flee") {
+      action = { type: "flee" };
+    } else {
+      return this.sendTo(room, playerId, { type: "actionError", error: "malformed action" });
+    }
+
+    const initialMembers = session.initialPlayerIds;
+    const result = session.applyAction(playerId, seq, action, Date.now() / 1000, Math.random);
+    if (!result.ok) {
+      this.sendTo(room, playerId, { type: "actionError", error: result.error ?? "rejected" });
+      return;
+    }
+
+    if (session.ended) {
+      const ended: CoopFightEndedMsg = { type: "fightEnded", fightId: session.id, outcome: session.ended };
+      for (const pid of initialMembers) this.sendTo(room, pid, ended);
+      this.sessions.delete(sessionKey(room.code, fightId));
+    } else {
+      const view = session.fightView();
+      for (const pid of session.playerIds) {
+        this.sendTo(room, pid, view);
+        const hand = session.handView(pid);
+        if (hand) this.sendTo(room, pid, hand);
+      }
+    }
+    this.broadcastState(room); // block/ready/hp changed: don't make the room wait for the next tick
+  }
+
+  private sendTo(room: CoopRoom, playerId: string, msg: CoopServerMsg) {
+    const sockets = this.sockets.get(room.code);
+    if (!sockets) return;
+    const data = JSON.stringify(msg);
+    for (const s of sockets) if (s.playerId === playerId && s.ws.readyState === WebSocket.OPEN) s.ws.send(data);
+  }
+
+  private broadcastState(room: CoopRoom) {
+    const sockets = this.sockets.get(room.code);
+    if (!sockets || sockets.size === 0) return;
+    const msg: CoopServerMsg = { type: "state", ...room.snapshot(Date.now()) };
+    broadcast(sockets, msg);
+  }
+
   // ---------- shared tick loop ----------
 
   private tickAll() {
@@ -215,10 +286,18 @@ export class CoopServer {
     for (const [code, room] of this.rooms) {
       const sockets = this.sockets.get(code);
       if (!sockets || sockets.size === 0) continue; // nobody connected: don't simulate or broadcast an empty room
-      room.tick(now / 1000, TICK_MS / 1000, Math.random);
-      const snapshot = room.snapshot(now);
-      const msg: CoopServerMsg = { type: "state", ...snapshot };
-      broadcast(sockets, msg);
+      const { newFights } = room.tick(now / 1000, TICK_MS / 1000, Math.random);
+      for (const rf of newFights) {
+        const session = new FightSession(room, rf, Math.random);
+        this.sessions.set(sessionKey(code, rf.id), session);
+        const view = session.fightView();
+        for (const pid of session.playerIds) {
+          this.sendTo(room, pid, view);
+          const hand = session.handView(pid);
+          if (hand) this.sendTo(room, pid, hand);
+        }
+      }
+      this.broadcastState(room);
       const last = this.lastSaved.get(code) ?? 0;
       if (now - last >= SAVE_DEBOUNCE_MS) {
         this.lastSaved.set(code, now);
@@ -233,6 +312,10 @@ export class CoopServer {
   }
 }
 
+function sessionKey(roomCode: string, fightId: string): string {
+  return `${roomCode}:${fightId}`;
+}
+
 function broadcast(sockets: Set<{ ws: WebSocket; playerId: string }>, msg: CoopServerMsg) {
   const data = JSON.stringify(msg);
   for (const { ws } of sockets) if (ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -241,7 +324,7 @@ function broadcast(sockets: Set<{ ws: WebSocket; playerId: string }>, msg: CoopS
 function persist(room: CoopRoom): PersistedRoom {
   return {
     players: [...room.players.values()].map((p) => ({ id: p.id, x: p.pos.x, y: p.pos.y, hp: p.hp })),
-    enemies: room.enemies.map((e) => ({ key: e.key, x: e.pos.x, y: e.pos.y, cx: e.center.x, cy: e.center.y, state: e.state, targetId: e.targetId, hp: e.hp })),
+    enemies: room.enemies.map((e) => ({ key: e.key, x: e.pos.x, y: e.pos.y, cx: e.center.x, cy: e.center.y, state: e.state, targetId: e.targetId, hp: e.hp, phase: e.phase })),
   };
 }
 
@@ -255,6 +338,7 @@ function restore(room: CoopRoom, data: PersistedRoom) {
     e.state = saved.state as RoomEnemy["state"];
     e.targetId = saved.targetId;
     e.hp = saved.hp;
+    e.phase = saved.phase ?? 0;
   }
   for (const saved of data.players ?? []) {
     const p = room.players.get(saved.id);

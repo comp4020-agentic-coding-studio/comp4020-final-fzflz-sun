@@ -6,6 +6,7 @@ export const WORLD_WIDTH = 2200;
 export const WORLD_HEIGHT = 1300;
 export const PLAYER_START = { x: 220, y: 650 };
 export const PLAYER_MAX_HP = 24;
+export const PLAYER_MAX_ENERGY = 3;
 export const PLAYER_EDGE = 16; // player is clamped this far inside the map
 
 // ---------- units: tier = how dangerous, role = what it does in a fight ----------

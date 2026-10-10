@@ -1,3 +1,6 @@
+/** Cards drawn at the start of a player's turn, solo or co-op. */
+export const HAND_SIZE = 4;
+
 export type CardKind = "single" | "aoe" | "guard" | "resource";
 export interface CardDef {
   name: string;

@@ -9,6 +9,9 @@ export interface CoopPlayerView {
   x: number;
   y: number;
   hp: number;
+  /** only meaningful while fightId is set */
+  block: number;
+  ready: boolean;
   online: boolean;
   /** the fight this player is currently in, or null while free exploring */
   fightId: string | null;
@@ -39,7 +42,77 @@ export interface CoopStateMsg {
   enemies: CoopEnemyView[];
 }
 
-export type CoopServerMsg = CoopHelloMsg | CoopStateMsg;
+/** Same shape as src/combat.ts's UnitIntent, so "words match the code" across the wire too. */
+export type CoopIntentView =
+  | { kind: "attack"; value: number; ranged?: boolean; targetId: string }
+  | { kind: "defend"; value: number }
+  | { kind: "charge"; next: number }
+  | { kind: "revive"; target: string; value: number }
+  | null;
+
+export interface CoopFightEnemyView {
+  key: string;
+  role: string;
+  tier: string;
+  hp: number;
+  maxHp: number;
+  downed: boolean;
+  intent: CoopIntentView;
+}
+
+export interface CoopFightPlayerView {
+  id: string;
+  hp: number;
+  block: number;
+  downed: boolean;
+  fled: boolean;
+  ready: boolean;
+}
+
+/**
+ * Sent only to the players actually in this fight (never broadcast room-wide):
+ * full shared enemy HP/intent/target/downed state, exactly what the brief
+ * asks teammates to see together. An outside player only sees `state`'s
+ * fightId tag — that there's a fight, not what's happening in it.
+ */
+export interface CoopFightMsg {
+  type: "fight";
+  fightId: string;
+  turn: number;
+  phase: string;
+  enemies: CoopFightEnemyView[];
+  players: CoopFightPlayerView[];
+}
+
+export interface CoopFightEndedMsg {
+  type: "fightEnded";
+  fightId: string;
+  outcome: "won" | "wiped" | "abandoned";
+}
+
+export interface CoopCardView {
+  id: string;
+  name: string;
+  kind: string;
+  cost: number;
+  value: number;
+  blurb: string;
+}
+
+/** Sent only to the one player it belongs to: a hand is never broadcast. */
+export interface CoopHandMsg {
+  type: "hand";
+  fightId: string;
+  cards: CoopCardView[];
+  energy: number;
+}
+
+export interface CoopActionErrorMsg {
+  type: "actionError";
+  error: string;
+}
+
+export type CoopServerMsg = CoopHelloMsg | CoopStateMsg | CoopFightMsg | CoopFightEndedMsg | CoopHandMsg | CoopActionErrorMsg;
 
 export interface CoopMoveMsg {
   type: "move";
@@ -48,4 +121,22 @@ export interface CoopMoveMsg {
   dy: number;
 }
 
-export type CoopClientMsg = CoopMoveMsg;
+export interface CoopPlayCardMsg {
+  type: "playCard";
+  seq: number;
+  cardInstanceId: string;
+  /** required for a "single" card, ignored otherwise */
+  targetKey?: string;
+}
+
+export interface CoopEndTurnMsg {
+  type: "endTurn";
+  seq: number;
+}
+
+export interface CoopFleeMsg {
+  type: "flee";
+  seq: number;
+}
+
+export type CoopClientMsg = CoopMoveMsg | CoopPlayCardMsg | CoopEndTurnMsg | CoopFleeMsg;

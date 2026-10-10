@@ -1,12 +1,14 @@
 import kaplay from "kaplay";
-import type { CoopClientMsg, CoopServerMsg } from "./coop-protocol.ts";
+import type { CoopClientMsg, CoopFightMsg, CoopHandMsg, CoopServerMsg } from "./coop-protocol.ts";
 import { AREAS, ENEMY_SPAWNS, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
 
-// Co-op's own entry point: shared exploration only (crit 9's base). Combat,
-// auto-join and reconnect windows land in later phases; this renders every
-// connected player and the same roaming enemies the server simulates, from
-// server-pushed snapshots, so two tabs looking at one room see one world, not
-// two separately-simulated ones kept in sync after the fact.
+// Co-op's own entry point: shared exploration (crit 9's base) plus the
+// server-authoritative fight itself (phase 3). Reconnect handling and visual
+// polish land in phase 4; this renders every connected player, the shared
+// roaming enemies, and — once a fight forms — a plain functional card dock
+// driven entirely by the server's `fight`/`hand` messages, so two tabs in one
+// room see one world and one fight, not two separately-simulated copies kept
+// in sync after the fact.
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const ui = {
@@ -18,6 +20,15 @@ const ui = {
   createBtn: $<HTMLButtonElement>("createBtn"),
   joinBtn: $<HTMLButtonElement>("joinBtn"),
   formError: $("formError"),
+  fightDock: $("fightDock"),
+  fightTurn: $("fightTurn"),
+  fightHint: $("fightHint"),
+  enemyList: $("enemyList"),
+  partyList: $("partyList"),
+  hand: $("hand"),
+  endTurnBtn: $<HTMLButtonElement>("endTurnBtn"),
+  fleeBtn: $<HTMLButtonElement>("fleeBtn"),
+  fightError: $("fightError"),
 };
 
 function setStatus(s: string) {
@@ -277,6 +288,93 @@ window.addEventListener("blur", () => {
 // this guards against a missed keyup event (alt-tab mid-press, etc.)
 setInterval(() => sendIntent(true), 1500);
 
+// ---------- fight dock: plain HTML, driven entirely by the server's fight/hand messages ----------
+
+let currentFight: CoopFightMsg | null = null;
+let currentHand: CoopHandMsg | null = null;
+let selectedTargetKey: string | null = null;
+let actionSeq = 0;
+
+function sendAction(msg: CoopClientMsg) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(msg));
+}
+function nextSeq() {
+  return ++actionSeq;
+}
+
+function intentLabel(intent: CoopFightMsg["enemies"][number]["intent"]): string {
+  if (!intent) return "";
+  if (intent.kind === "attack") return `${intent.ranged ? "shoot" : "atk"} ${intent.value}`;
+  if (intent.kind === "defend") return `def ${intent.value}`;
+  if (intent.kind === "charge") return `charge → ${intent.next}`;
+  return `revive ${intent.target}`;
+}
+
+function renderFight() {
+  const f = currentFight;
+  if (!f) {
+    ui.fightDock.hidden = true;
+    return;
+  }
+  ui.fightDock.hidden = false;
+  const me = f.players.find((p) => p.id === selfId);
+  setText(ui.fightTurn, `Turn ${f.turn}${me?.ready ? " · waiting on your party…" : ""}`);
+
+  ui.enemyList.textContent = "";
+  for (const e of f.enemies) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.disabled = e.downed;
+    btn.setAttribute("aria-pressed", String(selectedTargetKey === e.key));
+    const targetsMe = e.intent?.kind === "attack" && e.intent.targetId === selfId;
+    btn.innerHTML = `<span class="name">${e.role}${e.downed ? " (down)" : ""}</span><br>HP ${e.hp}/${e.maxHp}<br>${intentLabel(e.intent)}${targetsMe ? " → you" : ""}`;
+    btn.onclick = () => {
+      selectedTargetKey = selectedTargetKey === e.key ? null : e.key;
+      renderFight();
+    };
+    ui.enemyList.appendChild(btn);
+  }
+
+  ui.partyList.textContent = "";
+  for (const p of f.players) {
+    const span = document.createElement("span");
+    span.className = p.ready ? "ready" : "";
+    const who = p.id === selfId ? "you" : p.id.slice(0, 6);
+    span.textContent = `${who}: ${p.downed ? "down" : p.fled ? "fled" : `${p.hp} HP${p.block ? ` +${p.block} blk` : ""}`}${p.ready ? " ✓" : ""}`;
+    ui.partyList.appendChild(span);
+  }
+
+  const myHandEnabled = !!me && !me.downed && !me.fled && !me.ready;
+  ui.hand.textContent = "";
+  for (const c of currentHand?.cards ?? []) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.disabled = !myHandEnabled || (currentHand?.energy ?? 0) < c.cost;
+    btn.innerHTML = `<span class="name">${c.name}</span><span class="cost">${c.cost} energy</span>`;
+    btn.title = c.blurb;
+    btn.onclick = () => {
+      if (c.kind === "single" && !selectedTargetKey) {
+        setText(ui.fightError, "select an enemy first");
+        return;
+      }
+      setText(ui.fightError, "");
+      sendAction({ type: "playCard", seq: nextSeq(), cardInstanceId: c.id, targetKey: c.kind === "single" ? selectedTargetKey! : undefined });
+      selectedTargetKey = null;
+    };
+    ui.hand.appendChild(btn);
+  }
+  ui.endTurnBtn.disabled = !myHandEnabled;
+  ui.fleeBtn.disabled = !myHandEnabled;
+}
+
+function setText(el: HTMLElement, text: string) {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+ui.endTurnBtn.onclick = () => sendAction({ type: "endTurn", seq: nextSeq() });
+ui.fleeBtn.onclick = () => sendAction({ type: "flee", seq: nextSeq() });
+
 // ---------- connect ----------
 
 async function main() {
@@ -296,6 +394,20 @@ async function main() {
       selfId = msg.selfId;
     } else if (msg.type === "state") {
       applyState(msg);
+    } else if (msg.type === "fight") {
+      currentFight = msg;
+      renderFight();
+    } else if (msg.type === "hand") {
+      currentHand = msg;
+      renderFight();
+    } else if (msg.type === "fightEnded") {
+      currentFight = null;
+      currentHand = null;
+      selectedTargetKey = null;
+      renderFight();
+      showFightEndFeedback(msg.outcome);
+    } else if (msg.type === "actionError") {
+      setText(ui.fightError, msg.error);
     }
   });
 
@@ -305,7 +417,14 @@ async function main() {
     status: ui.status.textContent,
     players: [...players.keys()],
     enemies: [...enemies.keys()],
+    fight: currentFight,
+    hand: currentHand,
   });
+}
+
+function showFightEndFeedback(outcome: "won" | "wiped" | "abandoned") {
+  const msg = outcome === "won" ? "Victory!" : outcome === "wiped" ? "You fell." : "Retreated.";
+  setStatus(`room ${new URLSearchParams(location.search).get("code") ?? ""} — ${msg}`);
 }
 
 main();

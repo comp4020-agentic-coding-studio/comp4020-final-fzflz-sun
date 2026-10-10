@@ -35,6 +35,8 @@ const FIGHTS: { name: string; camp: string; ids: string[] }[] = [
   { name: "warlord + guard", camp: "lair", ids: ["lair-guard", "lair-guard-2", "lair-boss"] },
 ];
 
+const fightPlayer = (f: Fight) => f.players[0];
+
 const value = (u: CombatUnit) => {
   const it = u.intent;
   const dmg = it?.kind === "attack" ? it.value : it?.kind === "revive" ? 6 : 0;
@@ -49,7 +51,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
     if (!st.length) return;
     const hand = piles.hand;
     const idx = (name: string) => hand.findIndex((c) => c.name === name);
-    const incoming = st.reduce((s, u) => s + (u.intent?.kind === "attack" ? u.intent.value : 0), 0) - f.player.block;
+    const incoming = st.reduce((s, u) => s + (u.intent?.kind === "attack" ? u.intent.value : 0), 0) - fightPlayer(f).block;
     const play = (i: number, fn: () => void) => {
       const card = takeFromHand(piles, i)!;
       PLAYS.push(card.name);
@@ -77,7 +79,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
     }
     if (!guardDone && idx("Guard") >= 0 && energy >= 1 && incoming >= 6) {
       guardDone = true;
-      play(idx("Guard"), () => (f.player.block += 5));
+      play(idx("Guard"), () => (fightPlayer(f).block += 5));
       continue;
     }
     if (idx("Strike") >= 0 && energy >= 1) {
@@ -91,7 +93,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
       continue;
     }
     if (idx("Guard") >= 0 && energy >= 1 && incoming > 0) {
-      play(idx("Guard"), () => (f.player.block += 5));
+      play(idx("Guard"), () => (fightPlayer(f).block += 5));
       continue;
     }
     return;
@@ -101,7 +103,7 @@ function playTurn(f: Fight, piles: Piles, r: Rng, energy: number) {
 function runOnce(seed: number) {
   const r = rng(seed);
   const piles = newPiles(r);
-  const player = { hp: PLAYER_MAX_HP, block: 0 };
+  const player = { id: "P", hp: PLAYER_MAX_HP, block: 0, downed: false, fled: false };
   const phases: Record<string, number> = {};
   const taken: number[] = [];
   const turns: number[] = [];
@@ -112,7 +114,7 @@ function runOnce(seed: number) {
       const s = ENEMY_SPAWNS.find((sp) => sp.id === id)!;
       return makeUnit(id, s.role, s.group, undefined, phases[id] ?? 0);
     });
-    const f = beginFight(units, player);
+    const f = beginFight(units, [player]);
     const before = player.hp;
     let t = 0;
     while (!isWon(f) && player.hp > 0 && t < 40) {
@@ -125,7 +127,7 @@ function runOnce(seed: number) {
       drawHand(piles, 4, r);
       playTurn(f, piles, r, 3);
       tally.reviveCancelled += reviving.filter((u) => u.downed).length;
-      if (heavy.some((u) => !u.downed) && f.player.block > 0) tally.guardOnHeavy++;
+      if (heavy.some((u) => !u.downed) && player.block > 0) tally.guardOnHeavy++;
       if (isWon(f)) break;
       discardHand(piles);
       beginEnemyTurn(f);
@@ -168,7 +170,8 @@ if (DEMO) {
       const sp = ENEMY_SPAWNS.find((x) => x.id === id)!;
       return makeUnit(id, sp.role, sp.group, undefined, ph[id] ?? 0);
     });
-    const f = beginFight(units, { hp: PLAYER_MAX_HP, block: 0 });
+    const demoPlayer = { id: "P", hp: PLAYER_MAX_HP, block: 0, downed: false, fled: false };
+    const f = beginFight(units, [demoPlayer]);
     const lines: string[] = [];
     for (let t = 1; t <= 2 && !isWon(f); t++) {
       startPlayerTurn(f);
@@ -176,11 +179,11 @@ if (DEMO) {
       const piles = { draw: [], hand: hand.slice(), discard: [], exhaust: [] } as Piles;
       PLAYS.length = 0;
       playTurn(f, piles, rng(1), 3);
-      lines.push(`  turn ${t} [${intents}] -> ${PLAYS.join(" ").replace(/ ->/g, "->")}${f.player.block ? ` (block ${f.player.block})` : ""}`);
+      lines.push(`  turn ${t} [${intents}] -> ${PLAYS.join(" ").replace(/ ->/g, "->")}${demoPlayer.block ? ` (block ${demoPlayer.block})` : ""}`);
       if (isWon(f)) break;
       beginEnemyTurn(f);
       for (const ev of planEnemyTurn(f).events) applyEnemyEvent(f, ev);
-      f.player.block = 0;
+      demoPlayer.block = 0;
     }
     console.log(`${name}:\n${lines.join("\n")}\n`);
   }

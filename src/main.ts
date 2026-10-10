@@ -1,5 +1,6 @@
 import kaplay from "kaplay";
 import {
+  HAND_SIZE,
   type CardDef,
   type Piles,
   drawHand,
@@ -28,6 +29,7 @@ import {
   type CombatUnit,
   type EnemyEvent,
   type Fight,
+  type FightPlayer,
 } from "./combat.ts";
 import { boxAt, boxFor, clampCam, formationBounds, layoutFormation, planCamera, type Rect, type Viewport } from "./formation.ts";
 import { SaveClient, SaveFlowError, type SavePayload, type SaveStatus } from "./net.ts";
@@ -43,6 +45,7 @@ import {
   GROUP_BY_ID,
   PHASED_IDS,
   PLAYER_EDGE,
+  PLAYER_MAX_ENERGY,
   PLAYER_MAX_HP,
   PLAYER_START,
   UNITS,
@@ -70,8 +73,6 @@ const START_PARAM = DEV ? params.get("start") : null;
 // ---------- tunables ----------
 
 const PLAYER_SPEED = 220;
-const PLAYER_MAX_ENERGY = 3;
-const HAND_SIZE = 4;
 
 const FLEE_IMMUNITY = 2.5;
 const LOAD_IMMUNITY = 2.5; // after restoring a checkpoint, a moment to get your bearings
@@ -211,6 +212,33 @@ const player = k.add([
   "player",
   { hp: PLAYER_MAX_HP, energy: PLAYER_MAX_ENERGY, block: 0 },
 ]);
+
+/**
+ * A live view of the one Kaplay player entity, shaped like combat.ts's
+ * FightPlayer. Not stored directly on the entity: Kaplay's GameObj already
+ * owns a property named `id` (its own object identity), so a custom field of
+ * the same name would silently collide with it.
+ */
+const SOLO_ID = "solo";
+function soloFightPlayer(): FightPlayer {
+  return {
+    id: SOLO_ID,
+    get hp() {
+      return player.hp;
+    },
+    set hp(v: number) {
+      player.hp = v;
+    },
+    get block() {
+      return player.block;
+    },
+    set block(v: number) {
+      player.block = v;
+    },
+    downed: false,
+    fled: false,
+  };
+}
 
 type RunState = "menu" | "playing" | "dead" | "won";
 let piles: Piles = newPiles();
@@ -677,8 +705,7 @@ function tryTriggerEncounter(now: number) {
 
   moveTarget = null;
   const anchor = { x: player.pos.x, y: player.pos.y };
-  player.block = 0;
-  const fight = beginFight(roster.map((e) => e.unit), player);
+  const fight = beginFight(roster.map((e) => e.unit), [soloFightPlayer()]); // beginFight zeroes block itself
   activeEncounter = {
     id: nextEncounterId++,
     roster,
@@ -789,7 +816,7 @@ function endPlayerTurn(fleeing: boolean) {
   for (const e of enc.roster) refreshHpLabel(e);
   const plan = planEnemyTurn(enc.fight);
   showFeedback(fleeing ? "Fleeing - enemies act first..." : "Enemy turn");
-  playResolve(enc, plan.events, plan.died, 0);
+  playResolve(enc, plan.events, plan.wiped, 0);
 }
 
 const byKey = (enc: Encounter, key: string) => enc.roster.find((r) => r.unit.key === key);
@@ -817,9 +844,14 @@ function showEnemyEvent(enc: Encounter, ev: EnemyEvent) {
       floatText(t.pos.add(0, -20), `revived +${ev.value}`, k.rgb(150, 230, 150));
     }
     showFeedback(`${enemyName(e)} revives ${t ? enemyName(t) : ev.target} at ${ev.value} HP`);
-  } else {
+  } else if (ev.kind === "fizzle") {
     floatText(e.pos.add(0, -20), "fizzled", k.rgb(170, 170, 170));
     showFeedback(`${enemyName(e)}'s revive fizzles`);
+  } else {
+    // attackVoid: only reachable with more than one player in the fight (its
+    // shown target already fell to an earlier action this same turn) — can't
+    // happen in solo play, where there's exactly one, always-valid target.
+    showFeedback(`${enemyName(e)}'s attack finds nobody there`);
   }
   for (const r of enc.roster) {
     refreshHpLabel(r);
@@ -827,7 +859,7 @@ function showEnemyEvent(enc: Encounter, ev: EnemyEvent) {
   }
 }
 
-function playResolve(enc: Encounter, events: EnemyEvent[], died: boolean, i: number) {
+function playResolve(enc: Encounter, events: EnemyEvent[], wiped: boolean, i: number) {
   if (activeEncounter !== enc || runState !== "playing") return;
   if (i >= events.length) {
     finishResolve(enc);
@@ -835,11 +867,11 @@ function playResolve(enc: Encounter, events: EnemyEvent[], died: boolean, i: num
   }
   applyEnemyEvent(enc.fight, events[i]);
   showEnemyEvent(enc, events[i]);
-  if (died && i === events.length - 1) {
+  if (wiped && i === events.length - 1) {
     finishDeath();
     return;
   }
-  schedule(ENEMY_ACTION_GAP, () => playResolve(enc, events, died, i + 1));
+  schedule(ENEMY_ACTION_GAP, () => playResolve(enc, events, wiped, i + 1));
 }
 
 /** Whoever is still down when a fight ends is confirmed dead: removed, and counted once by stable id. */
@@ -869,9 +901,8 @@ function finishResolve(enc: Encounter) {
     showFeedback("Escaped!");
     return;
   }
-  player.block = 0;
   if (!setPhase(enc, "nextTurn")) return;
-  startPlayerTurn(enc);
+  startPlayerTurn(enc); // combat.ts's startPlayerTurn zeroes the active players' block itself
 }
 
 function finishUnforming(enc: Encounter) {
@@ -1088,7 +1119,7 @@ function renderHud() {
       resolving: cur.fleeing ? "fleeing: enemies act first" : "ENEMY TURN",
       unforming: "escaped, enemies falling back",
     };
-    const inc = incomingDamage(cur.fight);
+    const inc = incomingDamage(cur.fight, SOLO_ID);
     setText(
       ui.turn,
       `Turn ${cur.fight.turn} · ${phaseLabel[cur.phase]}` +

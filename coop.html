@@ -43,6 +43,26 @@
       #panel .note { font-size: .82rem; color: var(--dim); margin-top: .8rem; }
       #joinLink { display: flex; gap: .4rem; align-items: center; margin-top: .4rem; }
       #joinLink input { flex: 1; }
+
+      /* --- fight dock: a plain functional panel, not the solo game's styled HUD --- */
+      #fightDock { position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); padding: .6rem .75rem; padding-bottom: max(.6rem, env(safe-area-inset-bottom)); box-sizing: border-box; }
+      #fightDock[hidden] { display: none; }
+      #fightTop { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; flex-wrap: wrap; font-size: .85rem; color: var(--dim); margin-bottom: .4rem; }
+      #enemyList { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
+      #enemyList button { font-size: .8rem; text-align: left; line-height: 1.3; }
+      #enemyList button[aria-pressed="true"] { border-color: var(--accent); background: #4a3f1a; }
+      #enemyList button:disabled { opacity: .5; }
+      #partyList { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; font-size: .8rem; }
+      #partyList span { padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--line); }
+      #partyList span.ready { border-color: #6fcf7f; color: #6fcf7f; }
+      #fightRow { display: flex; gap: .5rem; align-items: stretch; flex-wrap: wrap; }
+      #hand { display: flex; gap: .4rem; flex: 1; flex-wrap: wrap; }
+      #hand button { display: flex; flex-direction: column; align-items: flex-start; min-width: 6rem; }
+      #hand button .name { font-weight: 600; }
+      #hand button .cost { color: var(--accent); font-size: .75rem; }
+      #fightActions { display: flex; gap: .4rem; }
+      #fightActions button#fleeBtn { background: #4a2626; border-color: #a05050; }
+      #fightError { color: var(--bad); font-size: .8rem; min-height: 1.2em; margin-top: .3rem; }
     </style>
   </head>
   <body>
@@ -50,6 +70,19 @@
     <div id="hud">
       <div id="roster" aria-label="Who's here"></div>
       <div id="status">connecting…</div>
+    </div>
+    <div id="fightDock" hidden aria-label="Fight">
+      <div id="fightTop"><span id="fightTurn"></span><span id="fightHint">tap an enemy, then a card</span></div>
+      <div id="enemyList" aria-label="Enemies"></div>
+      <div id="partyList" aria-label="Your party"></div>
+      <div id="fightRow">
+        <div id="hand" aria-label="Your hand"></div>
+        <div id="fightActions">
+          <button id="endTurnBtn" type="button">End turn</button>
+          <button id="fleeBtn" type="button">Flee</button>
+        </div>
+      </div>
+      <p id="fightError" role="alert"></p>
     </div>
     <div id="screen" role="dialog" aria-modal="true">
       <div id="panel">

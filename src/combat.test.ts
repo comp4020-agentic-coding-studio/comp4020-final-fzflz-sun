@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activePlayers,
   applyEnemyEvent,
   beginEnemyTurn,
   beginFight,
@@ -8,18 +9,25 @@ import {
   DANGER_THRESHOLD,
   hitUnit,
   incomingDamage,
+  isPartyWiped,
   isWon,
   makeUnit,
+  markFled,
+  playerById,
   planEnemyTurn,
   startPlayerTurn,
   unitByKey,
   type Fight,
+  type FightPlayer,
 } from "./combat.ts";
 import { UNITS } from "./world.ts";
 
-const fight = (units: ReturnType<typeof makeUnit>[], hp = 24) => beginFight(units, { hp, block: 0 });
+const solo = (hp = 24): FightPlayer[] => [{ id: "solo", hp, block: 0, downed: false, fled: false }];
+const fight = (units: ReturnType<typeof makeUnit>[], hp = 24) => beginFight(units, solo(hp));
+/** Solo's one player, for the tests that read its hp/block directly. */
+const soloPlayer = (f: Fight) => playerById(f, "solo")!;
 
-/** Plays an enemy turn to the end, the way main.ts does (plan, then apply each event). */
+/** Plays an enemy turn to the end, the way main.ts / fight-session.ts does (plan, then apply each event). */
 function enemyTurn(f: Fight) {
   beginEnemyTurn(f);
   const plan = planEnemyTurn(f);
@@ -31,18 +39,18 @@ const mageGuard = () =>
   fight([makeUnit("g1", "brute", "north"), makeUnit("g2", "brute", "north"), makeUnit("mage", "mage", "north")]);
 
 describe("intents per role", () => {
-  it("grunt and swarmling always attack for their listed damage", () => {
+  it("grunt and swarmling always attack for their listed damage, aimed at the only player", () => {
     const f = fight([makeUnit("b", "brute", null), makeUnit("s", "swarm", "hollow")]);
     startPlayerTurn(f);
-    expect(unitByKey(f, "b")!.intent).toEqual({ kind: "attack", value: 3 });
-    expect(unitByKey(f, "s")!.intent).toEqual({ kind: "attack", value: 2 });
-    expect(incomingDamage(f)).toBe(5);
+    expect(unitByKey(f, "b")!.intent).toEqual({ kind: "attack", value: 3, targetId: "solo" });
+    expect(unitByKey(f, "s")!.intent).toEqual({ kind: "attack", value: 2, targetId: "solo" });
+    expect(incomingDamage(f, "solo")).toBe(5);
   });
 
   it("a mage with nobody to revive shoots for 2 (ranged)", () => {
     const f = mageGuard();
     startPlayerTurn(f);
-    expect(unitByKey(f, "mage")!.intent).toEqual({ kind: "attack", value: 2, ranged: true });
+    expect(unitByKey(f, "mage")!.intent).toEqual({ kind: "attack", value: 2, ranged: true, targetId: "solo" });
   });
 
   it("the captain cycles attack 4 -> charge (names 10) -> attack 10", () => {
@@ -54,10 +62,10 @@ describe("intents per role", () => {
       enemyTurn(f);
     }
     expect(seen).toEqual([
-      { kind: "attack", value: 4 },
+      { kind: "attack", value: 4, targetId: "solo" },
       { kind: "charge", next: 10 },
-      { kind: "attack", value: 10 },
-      { kind: "attack", value: 4 },
+      { kind: "attack", value: 10, targetId: "solo" },
+      { kind: "attack", value: 4, targetId: "solo" },
     ]);
   });
 });
@@ -75,7 +83,7 @@ describe("the player turn is still", () => {
     startPlayerTurn(f);
     const plan = enemyTurn(f);
     expect(plan.events.map((e) => [e.kind, e.from])).toEqual([["attack", "g1"], ["attack", "g2"], ["attack", "mage"]]);
-    expect(f.player.hp).toBe(24 - 3 - 3 - 2);
+    expect(soloPlayer(f).hp).toBe(24 - 3 - 3 - 2);
   });
 });
 
@@ -111,7 +119,7 @@ describe("downed, revived, confirmed dead", () => {
     expect(g1).toMatchObject({ hp: 3, downed: false, intent: null });
     expect(plan.events.some((e) => e.from === "g1")).toBe(false); // no extra action this turn
     startPlayerTurn(f);
-    expect(g1.intent).toEqual({ kind: "attack", value: 3 }); // acts normally next turn
+    expect(g1.intent).toEqual({ kind: "attack", value: 3, targetId: "solo" }); // acts normally next turn
     expect(hitUnit(f, "g1", 1).dealt).toBe(1); // and can be targeted
   });
 
@@ -214,7 +222,7 @@ describe("action phases carry over", () => {
     const again = makeUnit("boss", "boss", "lair", 40, saved);
     f = fight([again], 99);
     startPlayerTurn(f);
-    expect(again.intent).toEqual({ kind: "attack", value: 12 }); // the charged hit, not a reset
+    expect(again.intent).toEqual({ kind: "attack", value: 12, targetId: "solo" }); // the charged hit, not a reset
   });
 
   it("the boss's DEF block lasts through the player's turn, then expires", () => {
@@ -228,12 +236,98 @@ describe("action phases carry over", () => {
     expect(unitByKey(f, "boss")!.block).toBe(0);
   });
 
-  it("the enemy turn stops at the killing blow", () => {
+  it("the enemy turn stops once the (solo) party is wiped", () => {
     const f = fight([makeUnit("a", "brute", null), makeUnit("b", "brute", null), makeUnit("c", "brute", null)], 5);
     startPlayerTurn(f);
     const plan = enemyTurn(f);
-    expect(plan.died).toBe(true);
+    expect(plan.wiped).toBe(true);
     expect(plan.events.map((e) => e.from)).toEqual(["a", "b"]);
+  });
+});
+
+describe("co-op: more than one player in a fight", () => {
+  const two = (hpA = 24, hpB = 24): FightPlayer[] => [
+    { id: "a", hp: hpA, block: 0, downed: false, fled: false },
+    { id: "b", hp: hpB, block: 0, downed: false, fled: false },
+  ];
+
+  it("an attack aims at the lowest-HP active player, ties broken by join order", () => {
+    const f = beginFight([makeUnit("g", "brute", null)], two(24, 10));
+    startPlayerTurn(f);
+    expect(unitByKey(f, "g")!.intent).toMatchObject({ targetId: "b" });
+
+    const tied = beginFight([makeUnit("g2", "brute", null)], two(24, 24));
+    startPlayerTurn(tied);
+    expect(unitByKey(tied, "g2")!.intent).toMatchObject({ targetId: "a" }); // tie -> first in join order
+  });
+
+  it("a downed player stops being targeted and stops blocking the rest of the party", () => {
+    const f = beginFight([makeUnit("g1", "brute", null), makeUnit("g2", "brute", null)], two(3, 24));
+    startPlayerTurn(f); // both grunts aim at "a" (lower hp)
+    expect(unitByKey(f, "g1")!.intent).toMatchObject({ targetId: "a" });
+    expect(unitByKey(f, "g2")!.intent).toMatchObject({ targetId: "a" });
+    const plan = enemyTurn(f);
+    expect(playerById(f, "a")!.downed).toBe(true);
+    expect(plan.wiped).toBe(false); // "b" is untouched and still standing
+    expect(activePlayers(f).map((p) => p.id)).toEqual(["b"]);
+  });
+
+  it("an attack whose shown target already fell this same resolve voids, never retargets", () => {
+    // two grunts both aim at "a" (lower hp); the first kill voids the second's attack on "a"
+    const f = beginFight([makeUnit("g1", "brute", null), makeUnit("g2", "brute", null)], two(2, 24));
+    startPlayerTurn(f);
+    const plan = enemyTurn(f);
+    expect(plan.events[0]).toMatchObject({ kind: "attack", from: "g1", targetId: "a" });
+    expect(plan.events[1]).toEqual({ kind: "attackVoid", from: "g2", targetId: "a" });
+    expect(playerById(f, "b")!.hp).toBe(24); // "b" was never hit instead
+  });
+
+  it("only a full party wipe stops the resolve; one player down doesn't cut it short", () => {
+    const f = beginFight(
+      [makeUnit("g1", "brute", null), makeUnit("g2", "brute", null), makeUnit("g3", "brute", null)],
+      two(3, 24),
+    );
+    startPlayerTurn(f); // all three are shown aiming at "a" (lower hp) before any of them act
+    const plan = enemyTurn(f);
+    expect(plan.wiped).toBe(false); // "b" was never anyone's target: still full HP, untouched
+    expect(plan.events).toHaveLength(3); // g1 downs "a"; g2 and g3's shown attacks on "a" both void, never retarget to "b"
+    expect(plan.events[0]).toMatchObject({ kind: "attack", from: "g1", targetId: "a" });
+    expect(plan.events[1]).toEqual({ kind: "attackVoid", from: "g2", targetId: "a" });
+    expect(plan.events[2]).toEqual({ kind: "attackVoid", from: "g3", targetId: "a" });
+    expect(playerById(f, "b")!.hp).toBe(24);
+  });
+
+  it("the whole party down wipes, same as solo", () => {
+    const f = beginFight([makeUnit("g1", "brute", null), makeUnit("g2", "brute", null)], two(3, 2));
+    startPlayerTurn(f);
+    // force both intents onto separate targets so each dies to one hit
+    unitByKey(f, "g1")!.intent = { kind: "attack", value: 3, targetId: "a" };
+    unitByKey(f, "g2")!.intent = { kind: "attack", value: 2, targetId: "b" };
+    const plan = enemyTurn(f);
+    expect(plan.wiped).toBe(true);
+    expect(isPartyWiped(f)).toBe(true);
+  });
+
+  it("fleeing marks a player gone without touching anyone else's state", () => {
+    const f = beginFight([makeUnit("g", "brute", null)], two());
+    markFled(f, "a");
+    expect(playerById(f, "a")!.fled).toBe(true);
+    expect(activePlayers(f).map((p) => p.id)).toEqual(["b"]);
+    expect(playerById(f, "b")!.fled).toBe(false);
+  });
+
+  it("a downed player can't be marked fled (they didn't survive to leave)", () => {
+    const f = beginFight([makeUnit("g", "brute", null)], two(0, 24));
+    expect(playerById(f, "a")!.downed).toBe(true); // beginFight derives downed from hp<=0
+    markFled(f, "a");
+    expect(playerById(f, "a")!.fled).toBe(false);
+  });
+
+  it("incomingDamage is per player: each only sees attacks aimed at them", () => {
+    const f = beginFight([makeUnit("g1", "brute", null), makeUnit("g2", "brute", null)], two(10, 3));
+    startPlayerTurn(f); // both aim at "b" (lower hp)
+    expect(incomingDamage(f, "b")).toBe(6);
+    expect(incomingDamage(f, "a")).toBe(0);
   });
 });
 
