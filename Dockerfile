@@ -19,7 +19,7 @@ WORKDIR /app
 FROM base AS build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
-COPY index.html vite.config.ts* tsconfig.json ./
+COPY index.html coop.html vite.config.ts* tsconfig.json ./
 COPY src ./src
 RUN pnpm build
 

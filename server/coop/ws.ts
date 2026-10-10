@@ -22,6 +22,8 @@ const CODE_LEN = 6;
 const TICK_MS = 150;
 const SAVE_DEBOUNCE_MS = 2000;
 const NAME_MAX = 24;
+/** A disconnect mid-fight gets this long to reconnect before it's resolved as a normal, costed flee. */
+const RECONNECT_WINDOW_MS = 30_000;
 
 function newCode(): string {
   const bytes = randomBytes(CODE_LEN);
@@ -47,6 +49,8 @@ export class CoopServer {
   private lastSaved = new Map<string, number>();
   /** keyed by `${roomCode}:${fightId}`, since a RoomFight's id is only unique within its own room. */
   private sessions = new Map<string, FightSession>();
+  /** keyed by `${roomCode}:${playerId}`: a running reconnect-window countdown for someone who disconnected mid-fight. */
+  private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private timer: ReturnType<typeof setInterval>;
 
   constructor(dataDir: string) {
@@ -172,6 +176,7 @@ export class CoopServer {
   private onConnect(room: CoopRoom, playerId: string, ws: WebSocket) {
     const now = Date.now();
     room.setOnline(playerId, true, now);
+    this.cancelReconnectTimer(room.code, playerId); // back before the window ran out: nothing to resolve
     const entry = { ws, playerId };
     let set = this.sockets.get(room.code);
     if (!set) this.sockets.set(room.code, (set = new Set()));
@@ -221,9 +226,40 @@ export class CoopServer {
       set!.delete(entry);
       room.setOnline(playerId, false, Date.now());
       if (set!.size === 0) this.sockets.delete(room.code);
+      if (room.players.get(playerId)?.fightId) this.armReconnectTimer(room, playerId);
     };
     ws.on("close", onClose);
     ws.on("error", onClose);
+  }
+
+  /** Mid-fight disconnect: give them RECONNECT_WINDOW_MS to come back before it resolves as a normal, costed flee. */
+  private armReconnectTimer(room: CoopRoom, playerId: string) {
+    const key = sessionKey(room.code, playerId);
+    this.cancelReconnectTimer(room.code, playerId);
+    this.reconnectTimers.set(
+      key,
+      setTimeout(() => {
+        this.reconnectTimers.delete(key);
+        const member = room.players.get(playerId);
+        if (!member || member.online) return; // reconnected (or left) through some other path already
+        const fightId = member.fightId;
+        if (!fightId) return; // the fight they were in already ended on its own
+        const session = this.sessions.get(sessionKey(room.code, fightId));
+        if (!session) return;
+        const initialMembers = session.initialPlayerIds;
+        session.forceFlee(playerId, Date.now() / 1000, Math.random);
+        this.afterFightChange(room, fightId, session, initialMembers);
+      }, RECONNECT_WINDOW_MS).unref(),
+    );
+  }
+
+  private cancelReconnectTimer(roomCode: string, playerId: string) {
+    const key = sessionKey(roomCode, playerId);
+    const t = this.reconnectTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.reconnectTimers.delete(key);
+    }
   }
 
   private handleFightAction(room: CoopRoom, playerId: string, seq: number, raw: { type: string } & Record<string, unknown>) {
@@ -249,7 +285,11 @@ export class CoopServer {
       this.sendTo(room, playerId, { type: "actionError", error: result.error ?? "rejected" });
       return;
     }
+    this.afterFightChange(room, fightId, session, initialMembers);
+  }
 
+  /** Pushes the right follow-up views after anything changes a fight's state: client action, or a forced flee. */
+  private afterFightChange(room: CoopRoom, fightId: string, session: FightSession, initialMembers: string[]) {
     if (session.ended) {
       const ended: CoopFightEndedMsg = { type: "fightEnded", fightId: session.id, outcome: session.ended };
       for (const pid of initialMembers) this.sendTo(room, pid, ended);
@@ -308,6 +348,8 @@ export class CoopServer {
 
   close() {
     clearInterval(this.timer);
+    for (const t of this.reconnectTimers.values()) clearTimeout(t);
+    this.reconnectTimers.clear();
     this.store.close();
   }
 }

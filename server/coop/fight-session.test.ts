@@ -200,3 +200,42 @@ describe("FightSession: fleeing and death", () => {
     expect(room.fights.has("f1")).toBe(false);
   });
 });
+
+describe("FightSession: a reconnect window timing out (forceFlee)", () => {
+  it("is exactly like the player clicking Flee themselves: shown actions land, then they leave if they survived", () => {
+    const { session, room } = setup(["p1"], ["west-1"]);
+    const r = session.forceFlee("p1", 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(session.ended).toBe("abandoned"); // solo: resolved immediately, nobody left fighting
+    expect(room.players.get("p1")!.fightId).toBeNull();
+  });
+
+  it("never a free exit: it still takes a full round to resolve, same as a real flee", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    const r = session.forceFlee("p1", 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(session.ended).toBeNull(); // p2 hasn't readied yet: the round (and p1's departure) hasn't resolved
+    expect(session.isMember("p1")).toBe(true); // still structurally present until the round actually resolves
+  });
+
+  it("resolves alongside a teammate's own action, and doesn't disturb that teammate's own sequence checking", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    session.forceFlee("p1", 0, rng(2));
+    const r = session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+    expect(r.ok).toBe(true); // both now ready: the round resolves
+    expect(session.isMember("p1")).toBe(false); // p1 left (forced flee, survived the round)
+    expect(session.isMember("p2")).toBe(true); // p2 fought on alone
+    expect(session.ended).toBeNull();
+    const replay = session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2)); // p2's own seq tracking is unaffected
+    expect(replay.ok).toBe(false);
+  });
+
+  it("a downed or already-fled player can't be force-fled again", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    const fp1 = session.fight.players.find((p) => p.id === "p1")!;
+    fp1.hp = 0;
+    fp1.downed = true;
+    const r = session.forceFlee("p1", 0, rng(2));
+    expect(r.ok).toBe(false);
+  });
+});

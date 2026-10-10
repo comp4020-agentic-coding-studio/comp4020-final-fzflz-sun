@@ -55,8 +55,27 @@ You can explore six camps, fight, flee, die, and come back to a restored
 run. Closing mid-fight returns you to that fight's start. Starting a new run keeps the old one in your history; only "Erase my
 saved data", confirmed by typing ERASE, deletes anything.
 
-Not built yet: anything shared between players (crit 9), accounts, loot,
-talents and art.
+<!-- DRAFT (crit 9, awaiting author confirmation): a friend can now share the
+     map and a fight with you. Wording below is a first pass, not final. -->
+**Co-op (new, crit 9).** At [the co-op page](/coop.html) you can create or
+join a short-lived expedition with a friend, no account needed — a separate
+world from your solo save. You see each other move on one real shared map;
+walking close to a camp together pulls in anyone within 320px of whoever
+actually triggered it (further-off teammates stay free to explore, or start
+their own fight elsewhere). The fight itself runs on the server: everyone
+keeps their own hand and HP, nobody's cards resolve until everyone still
+standing has ended their turn, and fleeing or falling is a personal choice
+that doesn't end the fight for the rest of the party. A disconnect mid-fight
+gets 30 seconds to reconnect before it's resolved as an ordinary, costed
+flee. *Enforced:* `src/roam.test.ts`, `src/encounter.test.ts`,
+`src/combat.test.ts`, `server/coop/room.test.ts`,
+`server/coop/fight-session.test.ts`. *Not yet judged by play*: which player
+an unaimed attack picks (currently the lowest-HP one) is a first guess, not
+a tested one.
+
+Not built yet: accounts, loot, talents, art, and mid-fight persistence (a
+server restart during an active co-op fight currently loses that fight's
+progress rather than resuming it).
 
 ## Where these ideas came from
 

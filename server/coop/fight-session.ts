@@ -215,6 +215,27 @@ export class FightSession {
     return { ok: false, error: "unknown action" };
   }
 
+  /**
+   * A reconnect window timing out: never a free exit. Exactly like the
+   * player clicking Flee themselves — the shown enemy actions still land
+   * this round, and they only actually leave once it resolves — but it
+   * bypasses the normal per-player sequence check, since this is a
+   * server-internal decision, not a replayable client message.
+   */
+  forceFlee(playerId: string, now: number, rng: () => number): ActionResult {
+    if (this.ended) return { ok: false, error: "already ended" };
+    const ps = this.playerStates.get(playerId);
+    const p = playerById(this.fight, playerId);
+    if (!ps || !p || p.downed || p.fled) return { ok: false, error: "not an active member" };
+    const rp = this.room.players.get(playerId)!;
+    this.pendingFlee.add(playerId);
+    if (!rp.ready) {
+      rp.ready = true;
+      if (this.allActiveReady()) this.resolveRound(now, rng);
+    }
+    return { ok: true };
+  }
+
   private resolveRound(now: number, rng: () => number) {
     for (const [pid, ps] of this.playerStates) {
       const p = playerById(this.fight, pid)!;
