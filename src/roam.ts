@@ -42,6 +42,8 @@ export interface RoamUnit {
   pauseUntil: number;
   moveSince: number;
   outSince: number | null;
+  /** which player this unit noticed and is chasing; null unless state is "chasing" */
+  targetId: string | null;
 }
 
 /** Pack members this close to each other share an alert, and fight together. */
@@ -61,10 +63,17 @@ export const PAUSE_SPREAD = 1.8;
 /** a wander leg that takes longer than this (blocked by others) is abandoned */
 export const WANDER_GIVE_UP = 5;
 
+/** A player as roaming enemies see it: just an id (to remember who's being chased) and a position. */
+export interface RoamPlayer {
+  id: string;
+  pos: Pt;
+}
+
 export interface RoamOpts {
   now: number;
   dt: number;
-  player: Pt;
+  /** every player sharing this world; solo play passes a single-element list */
+  players: RoamPlayer[];
   rnd: () => number;
   world: { w: number; h: number };
   /** dev test fights: nobody gives up */
@@ -78,6 +87,21 @@ export type RoamEvent =
   | { kind: "homed"; key: string };
 
 const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+/** The closest player to `pos`, or null if nobody is sharing this world right now. */
+function nearestPlayer(pos: Pt, players: RoamPlayer[]): RoamPlayer | null {
+  let best: RoamPlayer | null = null;
+  let bestD = Infinity;
+  for (const p of players) {
+    const d = dist(pos, p.pos);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+/** A unit's own target, by id; undefined if that player isn't here anymore (offline, left). */
+const targetPos = (players: RoamPlayer[], id: string | null): Pt | undefined => (id ? players.find((p) => p.id === id)?.pos : undefined);
 const clamp = (n: number, lo: number, hi: number) => Math.min(Math.max(n, lo), hi);
 const clampPt = (p: Pt, margin: number, w: { w: number; h: number }): Pt => ({
   x: clamp(p.x, margin, w.w - margin),
@@ -131,6 +155,7 @@ function settle(us: RoamUnit[], o: RoamOpts, events: RoamEvent[]) {
     u.stateUntil = o.now + CALM_TIME;
     u.wanderTarget = null;
     u.outSince = null;
+    u.targetId = null;
   }
   events.push({ kind: "settled", keys: us.map((u) => u.key), center: c });
 }
@@ -140,6 +165,7 @@ function sendHome(u: RoamUnit, o: RoamOpts, events: RoamEvent[]) {
   u.state = "homing";
   u.wanderTarget = null;
   u.outSince = null;
+  u.targetId = null;
   events.push({ kind: "homing", key: u.key });
 }
 
@@ -186,34 +212,54 @@ export function roamTick(units: RoamUnit[], o: RoamOpts): RoamEvent[] {
 
   for (const u of live) if (u.state === "calm" && o.now >= u.stateUntil) u.state = "idle";
 
-  // noticing: idle units only; alerts spread through the noticer's link cluster
+  // noticing: idle units only; alerts spread through the noticer's link cluster,
+  // and the whole cluster chases whichever player the noticer actually saw.
   const awake = live.filter((u) => u.state === "idle" || u.state === "chasing");
   for (const cluster of linkClusters(awake)) {
-    const noticed = cluster.some((u) => u.state === "idle" && dist(u.pos, o.player) <= u.aggroRange);
-    if (!noticed) continue;
+    let seen: RoamPlayer | null = null;
+    for (const u of cluster) {
+      if (u.state !== "idle") continue;
+      const near = nearestPlayer(u.pos, o.players);
+      if (near && dist(u.pos, near.pos) <= u.aggroRange) {
+        seen = near;
+        break;
+      }
+    }
+    if (!seen) continue;
     const woke = cluster.filter((u) => u.state === "idle");
     for (const u of woke) {
       u.state = "chasing";
       u.wanderTarget = null;
       u.outSince = null;
+      u.targetId = seen.id;
     }
     events.push({ kind: "alerted", keys: woke.map((u) => u.key) });
+  }
+
+  // A chasing unit whose target isn't here anymore (disconnected, or a state set
+  // directly rather than through noticing) picks up the nearest player still
+  // around, instead of leashing against someone who no longer exists.
+  for (const u of live) {
+    if (u.state === "chasing" && targetPos(o.players, u.targetId) === undefined) {
+      u.targetId = nearestPlayer(u.pos, o.players)?.id ?? null;
+    }
   }
 
   if (!o.noDisengage) {
     for (const u of live) {
       if (u.state !== "chasing") continue;
+      const tp = targetPos(o.players, u.targetId);
       if (u.tier === "boss") {
-        const out = dist(u.pos, o.player) > u.aggroRange * LEASH_FACTOR;
+        const out = !tp || dist(u.pos, tp) > u.aggroRange * LEASH_FACTOR;
         if (dist(u.pos, u.spawn) > LAIR_RADIUS || sustained(u, out, o.now)) sendHome(u, o, events);
-      } else if (u.groupKind === "skirmish" && sustained(u, dist(u.pos, o.player) > u.aggroRange * LEASH_FACTOR, o.now)) {
+      } else if (u.groupKind === "skirmish" && sustained(u, !tp || dist(u.pos, tp) > u.aggroRange * LEASH_FACTOR, o.now)) {
         settle([u], o, events);
       }
     }
     const packIds = new Set(live.filter((u) => u.groupKind === "pack" && u.state === "chasing" && u.tier !== "boss").map((u) => u.group!));
     for (const g of packIds) {
       const chasers = live.filter((u) => u.group === g && u.state === "chasing" && u.tier !== "boss");
-      const nearest = Math.min(...chasers.map((u) => dist(u.pos, o.player)));
+      const nearest = Math.min(...chasers.map((u) => { const tp = targetPos(o.players, u.targetId); return tp ? dist(u.pos, tp) : Infinity; }));
       const leash = LEASH_FACTOR * Math.max(...chasers.map((u) => u.aggroRange));
       if (sustained(chasers[0], nearest > leash, o.now)) settle(chasers, o, events);
     }
@@ -224,7 +270,8 @@ export function roamTick(units: RoamUnit[], o: RoamOpts): RoamEvent[] {
     if (u.state === "chasing") {
       const escorted =
         u.role === "mage" && live.some((v) => v !== u && v.group === u.group && v.state === "chasing" && v.role !== "mage");
-      step(u, o.player, u.speed, o.dt, escorted ? MAGE_FOLLOW : u.engageRange);
+      const tp = targetPos(o.players, u.targetId) ?? u.pos; // target left the world: hold position until the leash settles it
+      step(u, tp, u.speed, o.dt, escorted ? MAGE_FOLLOW : u.engageRange);
     } else if (u.state === "homing") {
       if (step(u, u.spawn, u.speed, o.dt)) {
         u.pos.x = u.spawn.x;
@@ -260,7 +307,7 @@ export function roamTick(units: RoamUnit[], o: RoamOpts): RoamEvent[] {
  */
 export function settleAfterFlee(units: RoamUnit[], now: number, world: { w: number; h: number }): RoamEvent[] {
   const events: RoamEvent[] = [];
-  const o: RoamOpts = { now, dt: 0, player: { x: 0, y: 0 }, rnd: Math.random, world };
+  const o: RoamOpts = { now, dt: 0, players: [], rnd: Math.random, world };
   const live = units.filter((u) => u.alive);
   for (const u of live.filter((x) => x.tier === "boss")) {
     if (dist(u.pos, u.spawn) > 4) sendHome(u, o, events);

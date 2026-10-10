@@ -3,6 +3,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { checkProgression, MAX_SAVE_BYTES, newRun, validateSave, type SaveData } from "../src/save.ts";
+import { attachCoop } from "./coop/ws.ts";
+import { HttpError, json, parseCookies, readBody } from "./http.ts";
 import { renderReadme } from "./readme.ts";
 import { openStore } from "./store.ts";
 
@@ -19,59 +21,10 @@ const README = join(ROOT, "README.md");
 
 const COOKIE = "cc_visitor";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
-const MAX_BODY = 16 * 1024;
 
 const store = openStore(DATA_DIR);
 
 // ---------- helpers ----------
-
-function json(res: ServerResponse, status: number, body: unknown) {
-  const data = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
-  });
-  res.end(data);
-}
-
-function readBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((ok, fail) => {
-    let size = 0;
-    const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => {
-      size += c.length;
-      if (size > MAX_BODY) {
-        fail(new HttpError(413, "body too large"));
-        req.destroy();
-      } else chunks.push(c);
-    });
-    req.on("end", () => {
-      try {
-        ok(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {});
-      } catch {
-        fail(new HttpError(400, "body is not JSON"));
-      }
-    });
-    req.on("error", fail);
-  });
-}
-
-class HttpError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-function parseCookies(header: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const part of (header ?? "").split(";")) {
-    const i = part.indexOf("=");
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
-  }
-  return out;
-}
 
 /**
  * The visitor is whoever holds the cookie: a random 256-bit token, stored only
@@ -201,6 +154,10 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://local");
   const path = url.pathname;
   try {
+    if (path.startsWith("/api/coop/")) {
+      if (await coop.handleApi(req, res, path)) return;
+      throw new HttpError(404, "no such endpoint");
+    }
     if (path.startsWith("/api/")) return await api(req, res, path);
 
     if (path === "/readme") {
@@ -235,6 +192,8 @@ const server = createServer(async (req, res) => {
   }
 });
 
+const coop = attachCoop(server, DATA_DIR);
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`listening on http://0.0.0.0:${PORT} (${DEV ? "development" : "production"}, data in ${DATA_DIR})`);
 });
@@ -242,6 +201,7 @@ server.listen(PORT, "0.0.0.0", () => {
 const shutdown = () => {
   server.close(() => {
     store.close();
+    coop.close();
     process.exit(0);
   });
   setTimeout(() => process.exit(0), 3000).unref();

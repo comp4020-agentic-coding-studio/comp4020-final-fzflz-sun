@@ -333,6 +333,7 @@ function spawnEnemy(spec: SpawnSpec) {
       pauseUntil: k.time() + Math.random() * 1.5,
       moveSince: 0,
       outSince: null as number | null,
+      targetId: null as string | null,
       bodyRadius: def.radius, // not "radius": rect() owns that name
       mass: def.tier === "normal" ? 1 : def.tier === "elite" ? 1.6 : 2.2,
       aggroRange: def.aggroRange,
@@ -654,7 +655,7 @@ function updateExploration() {
   const events = roamTick(live, {
     now: k.time(),
     dt: k.dt(),
-    player: { x: player.pos.x, y: player.pos.y },
+    players: [{ id: "solo", pos: { x: player.pos.x, y: player.pos.y } }],
     rnd: Math.random,
     world: { w: WORLD_WIDTH, h: WORLD_HEIGHT },
     noDisengage: devNoDisengage,
@@ -1225,7 +1226,8 @@ function showStartScreen(p: SavePayload) {
       `<h1 id="panelTitle">Camp Clearer</h1>
        <p>A short card-battle trek. Choose which enemies to pull into each fight, read what they're about to do, and play your hand. Your progress is kept on the server for this browser, no account needed.</p>
        ${HOW_TO}
-       <div class="buttons"><button class="primary" id="go">Start a run</button><a href="/readme/" target="_blank" rel="noopener">What makes this good? (README)</a></div>`,
+       <div class="buttons"><button class="primary" id="go">Start a run</button><a href="/readme/" target="_blank" rel="noopener">What makes this good? (README)</a></div>
+       <p class="note"><a href="/coop.html">Play co-op with a friend (beta) →</a></p>`,
       { go: () => void beginNewRun() },
     );
   }
@@ -1236,6 +1238,7 @@ function showStartScreen(p: SavePayload) {
        ${summaryHtml(s)}
        <div class="buttons"><button class="primary" id="go">Continue run #${s.runNumber}</button><button id="new">New run…</button></div>
        ${HOW_TO}${historyHtml(p)}
+       <p class="note"><a href="/coop.html">Play co-op with a friend (beta) →</a></p>
        <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
       { go: () => startFromSave(s, true), new: () => confirmNewRun(p), erase: () => confirmErase(p) },
     );
@@ -1344,6 +1347,7 @@ function openMenu() {
      ${run ? summaryHtml(checkpointPreview()) : ""}
      <p class="note">${saveLine} ${activeEncounter ? "This fight isn't saved until it ends; closing now returns you to when it started." : ""}</p>
      <div class="buttons"><button class="primary" id="resume">Resume</button><button id="new">New run…</button><a href="/readme/" target="_blank" rel="noopener">README</a></div>
+     <p class="note"><a href="/coop.html" target="_blank" rel="noopener">Play co-op with a friend (beta) →</a></p>
      ${HOW_TO}
      <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
     { resume: hideScreen, new: () => confirmNewRun(p), erase: () => confirmErase(p) },

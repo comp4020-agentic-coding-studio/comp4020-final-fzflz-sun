@@ -28,7 +28,7 @@ function fromSpawn(id: string, at?: Pt, pace = 0.4): RoamUnit {
     pos, spawn: { x: sp.x, y: sp.y }, center: { ...pos }, offset: memberOffset(id),
     aggroRange: def.aggroRange, engageRange: def.engageRange, speed: def.speed, bodyRadius: def.radius,
     wanderRadius: wanderRadiusOf(id), wanderPace: pace, state: "idle", stateUntil: 0,
-    wanderTarget: null, pauseUntil: 0, moveSince: 0, outSince: null,
+    wanderTarget: null, pauseUntil: 0, moveSince: 0, outSince: null, targetId: null,
   };
 }
 function spawnCenter(u: RoamUnit) {
@@ -36,13 +36,13 @@ function spawnCenter(u: RoamUnit) {
   return u;
 }
 
-/** Runs `secs` of exploration with the player following `playerAt(t)`. */
+/** Runs `secs` of exploration with one solo player following `playerAt(t)`. */
 function sim(units: RoamUnit[], secs: number, playerAt: (t: number) => Pt, seed = 1, t0 = 0) {
   const r = rng(seed);
   const events: { t: number; ev: RoamEvent }[] = [];
   const track: Pt[][] = units.map(() => []);
   for (let t = t0; t < t0 + secs; t += DT) {
-    for (const ev of roamTick(units, { now: t, dt: DT, player: playerAt(t), rnd: r, world: WORLD })) events.push({ t, ev });
+    for (const ev of roamTick(units, { now: t, dt: DT, players: [{ id: "solo", pos: playerAt(t) }], rnd: r, world: WORLD })) events.push({ t, ev });
     units.forEach((u, i) => track[i].push({ ...u.pos }));
   }
   return { events, track };
@@ -244,6 +244,62 @@ describe("fights and pauses", () => {
     sim([u], 3, () => ({ x: 510, y: 500 }));
     expect(u.pos).toEqual({ x: 500, y: 500 });
     expect(u.state).toBe("engaged");
+  });
+});
+
+describe("more than one player sharing the world", () => {
+  /** Runs `secs` of exploration against a fixed list of players (co-op shape). */
+  function simMulti(units: RoamUnit[], secs: number, players: { id: string; pos: Pt }[]) {
+    const r = rng(5);
+    const events: { t: number; ev: RoamEvent }[] = [];
+    for (let t = 0; t < secs; t += DT) {
+      for (const ev of roamTick(units, { now: t, dt: DT, players, rnd: r, world: WORLD })) events.push({ t, ev });
+    }
+    return events;
+  }
+
+  it("a unit chases whichever player it actually noticed, not always the first in the list", () => {
+    const far = spawnCenter(fromSpawn("west-1"));
+    const nearP = { id: "near", pos: { x: far.spawn.x - 30, y: far.spawn.y } };
+    const farP = { id: "far", pos: { x: far.spawn.x + 5000, y: far.spawn.y } };
+    simMulti([far], 0.2, [farP, nearP]); // "far" is listed first; the unit should still notice "near"
+    expect(far.state).toBe("chasing");
+    expect(far.targetId).toBe("near");
+  });
+
+  it("two players can pull two different nearby skirmishers independently", () => {
+    const a = spawnCenter(fromSpawn("west-1"));
+    const b = spawnCenter(fromSpawn("west-2"));
+    const pa = { id: "a", pos: { x: a.spawn.x - 30, y: a.spawn.y } };
+    const pb = { id: "b", pos: { x: b.spawn.x - 30, y: b.spawn.y } };
+    simMulti([a, b], 0.2, [pa, pb]);
+    expect(a.targetId).toBe("a");
+    expect(b.targetId).toBe("b");
+  });
+
+  it("a unit keeps chasing its own target even while a different, closer player walks by", () => {
+    const u = spawnCenter(fromSpawn("west-1"));
+    u.state = "chasing";
+    u.targetId = "far";
+    const far = { id: "far", pos: { x: u.pos.x - 150, y: u.pos.y } };
+    const bystander = { id: "bystander", pos: { x: u.pos.x + 5, y: u.pos.y } }; // right next to it
+    simMulti([u], 0.1, [bystander, far]);
+    expect(u.targetId).toBe("far"); // doesn't retarget mid-chase onto the nearer player
+  });
+
+  it("losing its target (player disconnects) leashes it out after the delay, like walking out of range", () => {
+    const u = spawnCenter(fromSpawn("west-1", { x: 600, y: 400 }));
+    u.state = "chasing";
+    u.targetId = "gone";
+    const events = simMulti([u], DISENGAGE_DELAY + 0.2, []); // nobody left in the room
+    expect(events.some((e) => e.ev.kind === "settled")).toBe(true);
+    expect(u.state).toBe("calm");
+  });
+
+  it("an empty player list is handled safely: nobody chases, nobody crashes", () => {
+    const u = spawnCenter(fromSpawn("west-1"));
+    expect(() => simMulti([u], 1, [])).not.toThrow();
+    expect(u.state).toBe("idle");
   });
 });
 

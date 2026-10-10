@@ -14,6 +14,9 @@ importers:
       marked:
         specifier: ^18.0.14
         version: 18.0.14
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
     devDependencies:
       '@types/jsdom':
         specifier: ^30.0.0
@@ -21,6 +24,9 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.6
+      '@types/ws':
+        specifier: ^8.18.2
+        version: 8.18.2
       jsdom:
         specifier: ^30.1.0
         version: 30.1.0
@@ -425,6 +431,9 @@ packages:
   '@types/tough-cookie@4.0.5':
     resolution: {integrity: sha512-/Ad8+nIOV7Rl++6f1BdKxFSMgmoqEoYbHRpPcx3JEfv8VRsQe9Z4mCXeJBzxs7mbHY/XOZZuXlRNfhpVPbs6ZA==}
 
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
+
   '@vitest/mocker@5.0.1':
     resolution: {integrity: sha512-6K1DoBNAPGvuOcSsGA4D6x+5zEEff/KmOOP3uetT2TrGpVfI+HRHRnJJfKi5ib/g1vx8IYHQD8s0pbJz8WQI7Q==}
     peerDependencies:
@@ -813,6 +822,18 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  ws@8.22.0:
+    resolution: {integrity: sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xml-name-validator@5.0.0:
     resolution: {integrity: sha512-EvGK8EJ3DhaHfbRlETOWAS5pO9MZITeauHKJyb8wyajUfQUenkIg2MvLDTZ4T/TgIcm3HU0TFBgWWboAZ30UHg==}
     engines: {node: '>=18'}
@@ -1062,6 +1083,10 @@ snapshots:
       undici-types: 8.9.0
 
   '@types/tough-cookie@4.0.5': {}
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.13.6
 
   '@vitest/mocker@5.0.1(vite@7.3.6(@types/node@24.13.6)(lightningcss@1.33.0)(tsx@4.23.13)(yaml@2.9.1))':
     dependencies:
@@ -1409,6 +1434,8 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  ws@8.22.0: {}
 
   xml-name-validator@5.0.0: {}
 

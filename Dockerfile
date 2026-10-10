@@ -36,8 +36,10 @@ COPY --from=build /app/dist ./dist
 COPY package.json README.md ./
 COPY docs ./docs
 COPY server ./server
-# the server validates saves with the same rules the client uses
-COPY src/save.ts src/world.ts ./src/
+# the server validates saves and, for co-op, runs the same shared-world rules
+# (roam, encounter) the client uses, so the whole rules directory ships, not
+# just save.ts/world.ts
+COPY src ./src
 RUN mkdir -p /data
 EXPOSE 8080
 CMD ["node", "--disable-warning=ExperimentalWarning", "server/index.ts"]

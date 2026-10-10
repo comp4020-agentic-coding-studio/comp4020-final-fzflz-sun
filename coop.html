@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en-AU">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Camp Clearer — Co-op</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111;
+        --panel: rgba(18, 18, 22, 0.88);
+        --line: #4a4a52;
+        --text: #e8e8e8;
+        --dim: #a3a3ab;
+        --accent: #ffd250;
+        --bad: #ff8a80;
+        font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+      #game { position: fixed; inset: 0; touch-action: none; }
+      #game canvas { display: block; outline: none; }
+      #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; gap: .75rem; padding: .5rem .75rem; padding-top: max(.5rem, env(safe-area-inset-top)); background: linear-gradient(var(--panel), rgba(18,18,22,.6)); pointer-events: none; }
+      #hud a, #hud .pill { pointer-events: auto; }
+      #roster { display: flex; gap: .5rem; flex-wrap: wrap; font-size: .85rem; }
+      #roster span { padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--line); background: #1c1c22; }
+      #status { color: var(--dim); font-size: .85rem; }
+      a { color: var(--accent); text-decoration: none; }
+      button { font: inherit; color: var(--text); background: #2b2b33; border: 1px solid var(--line); border-radius: 8px; padding: .5rem .8rem; cursor: pointer; }
+      button:hover:not(:disabled) { border-color: #8a8a94; }
+      input { font: inherit; padding: .5rem .6rem; border-radius: 8px; border: 1px solid var(--line); background: #111; color: var(--text); }
+      #screen { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(8, 8, 10, .82); padding: 1rem; box-sizing: border-box; }
+      #screen[hidden] { display: none; }
+      #panel { width: min(28rem, 100%); background: #1b1b21; border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem; box-sizing: border-box; }
+      #panel h1 { margin: 0 0 .5rem; font-size: 1.4rem; }
+      #panel p { color: #cfcfd6; }
+      #panel .field { display: grid; gap: .3rem; margin: .8rem 0; }
+      #panel .field label { font-size: .85rem; color: var(--dim); }
+      #panel .field input { width: 100%; box-sizing: border-box; }
+      #panel .row { display: flex; gap: .5rem; margin-top: .5rem; }
+      #panel .row button { flex: 1; }
+      #panel .primary { background: #2f5a35; border-color: #6fcf7f; font-weight: 600; }
+      #panel .error { color: var(--bad); font-size: .85rem; min-height: 1.2em; }
+      #panel .note { font-size: .82rem; color: var(--dim); margin-top: .8rem; }
+      #joinLink { display: flex; gap: .4rem; align-items: center; margin-top: .4rem; }
+      #joinLink input { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="hud">
+      <div id="roster" aria-label="Who's here"></div>
+      <div id="status">connecting…</div>
+    </div>
+    <div id="screen" role="dialog" aria-modal="true">
+      <div id="panel">
+        <h1>Co-op expedition</h1>
+        <p>Explore the same camps as a friend, live. No account needed — this is separate from your solo save.</p>
+        <div class="field">
+          <label for="nameInput">Your name</label>
+          <input id="nameInput" maxlength="24" placeholder="Explorer" />
+        </div>
+        <div class="row">
+          <button id="createBtn" class="primary" type="button">Create new expedition</button>
+        </div>
+        <div class="field">
+          <label for="codeInput">Or join with a code</label>
+          <div id="joinLink">
+            <input id="codeInput" maxlength="6" placeholder="ABC123" style="text-transform: uppercase" />
+            <button id="joinBtn" type="button">Join</button>
+          </div>
+        </div>
+        <p class="error" id="formError" role="alert"></p>
+        <p class="note">Solo mode is at <a href="/">the main game</a>. "Not built yet" promises (loot, talents, art) still apply here.</p>
+      </div>
+    </div>
+    <script type="module" src="/src/coop-main.ts"></script>
+  </body>
+</html>
