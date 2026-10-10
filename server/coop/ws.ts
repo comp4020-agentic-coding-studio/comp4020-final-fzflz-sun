@@ -25,6 +25,29 @@ const NAME_MAX = 24;
 /** A disconnect mid-fight gets this long to reconnect before it's resolved as a normal, costed flee. */
 const RECONNECT_WINDOW_MS = 30_000;
 
+/**
+ * Opt-in (COOP_PERF_LOG=1), off by default: periodic plain-text summaries of
+ * tick/persist duration and event-loop lag, so a performance claim can point
+ * at real numbers instead of a guess. Never affects behavior when unset.
+ */
+const PERF_LOG = process.env.COOP_PERF_LOG === "1";
+class RollingStats {
+  private vals: number[] = [];
+  push(v: number) {
+    this.vals.push(v);
+    if (this.vals.length > 2000) this.vals.shift();
+  }
+  summary(): string {
+    if (!this.vals.length) return "n=0";
+    const sorted = [...this.vals].sort((a, b) => a - b);
+    const avg = sorted.reduce((s, v) => s + v, 0) / sorted.length;
+    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    const max = sorted[sorted.length - 1];
+    this.vals = [];
+    return `n=${sorted.length} avg=${avg.toFixed(2)}ms p95=${p95.toFixed(2)}ms max=${max.toFixed(2)}ms`;
+  }
+}
+
 function newCode(): string {
   const bytes = randomBytes(CODE_LEN);
   let out = "";
@@ -52,10 +75,28 @@ export class CoopServer {
   /** keyed by `${roomCode}:${playerId}`: a running reconnect-window countdown for someone who disconnected mid-fight. */
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private timer: ReturnType<typeof setInterval>;
+  private tickDurations = new RollingStats();
+  private persistDurations = new RollingStats();
+  private loopLag = new RollingStats();
+  private perfTimer?: ReturnType<typeof setInterval>;
+  private lagProbeTimer?: ReturnType<typeof setInterval>;
 
   constructor(dataDir: string) {
     this.store = openCoopStore(dataDir);
     this.timer = setInterval(() => this.tickAll(), TICK_MS).unref();
+    if (PERF_LOG) {
+      let lastProbe = Date.now();
+      this.lagProbeTimer = setInterval(() => {
+        const now = Date.now();
+        this.loopLag.push(Math.max(0, now - lastProbe - TICK_MS));
+        lastProbe = now;
+      }, TICK_MS).unref();
+      this.perfTimer = setInterval(() => {
+        console.log(
+          `[coop-perf] tick: ${this.tickDurations.summary()} | persist: ${this.persistDurations.summary()} | loop-lag: ${this.loopLag.summary()} | rooms=${this.rooms.size}`,
+        );
+      }, 5000).unref();
+    }
   }
 
   private identityFor(req: IncomingMessage, res?: ServerResponse): string {
@@ -322,6 +363,7 @@ export class CoopServer {
   // ---------- shared tick loop ----------
 
   private tickAll() {
+    const t0 = PERF_LOG ? performance.now() : 0;
     const now = Date.now();
     for (const [code, room] of this.rooms) {
       const sockets = this.sockets.get(code);
@@ -341,13 +383,18 @@ export class CoopServer {
       const last = this.lastSaved.get(code) ?? 0;
       if (now - last >= SAVE_DEBOUNCE_MS) {
         this.lastSaved.set(code, now);
+        const p0 = PERF_LOG ? performance.now() : 0;
         this.store.putState(code, JSON.stringify(persist(room)), now);
+        if (PERF_LOG) this.persistDurations.push(performance.now() - p0);
       }
     }
+    if (PERF_LOG) this.tickDurations.push(performance.now() - t0);
   }
 
   close() {
     clearInterval(this.timer);
+    if (this.perfTimer) clearInterval(this.perfTimer);
+    if (this.lagProbeTimer) clearInterval(this.lagProbeTimer);
     for (const t of this.reconnectTimers.values()) clearTimeout(t);
     this.reconnectTimers.clear();
     this.store.close();

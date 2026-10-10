@@ -1,6 +1,12 @@
 import kaplay from "kaplay";
 import type { CoopClientMsg, CoopFightMsg, CoopHandMsg, CoopServerMsg } from "./coop-protocol.ts";
-import { AREAS, ENEMY_SPAWNS, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
+import { AREAS, ENEMY_SPAWNS, PLAYER_EDGE, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
+
+// Keep in step with PLAYER_SPEED in server/coop/room.ts: the local-player
+// prediction below must integrate movement exactly like the server does, or
+// the reconciliation in applyState() would be fighting a mismatched guess
+// every single snapshot instead of an occasional small correction.
+const PLAYER_SPEED = 220;
 
 // Co-op's own entry point: shared exploration (crit 9's base) plus the
 // server-authoritative fight itself (phase 3). Reconnect handling and visual
@@ -135,36 +141,86 @@ function makeEnemyBody(role: string, tier: string) {
   ]);
 }
 
+// ---------- position smoothing: the server only broadcasts a `state`
+// snapshot every ~150ms (server/coop/ws.ts's TICK_MS); rendering raw
+// snapshot positions made motion visibly step once per snapshot instead of
+// smoothly every frame (confirmed with tools/coop-perf-check.mjs: Chrome was
+// a flawless 60fps throughout, but the displayed position only changed value
+// roughly once every 9 rendered frames while walking — a rendering/sync
+// problem, not a dropped-frame one). Remote players and enemies are rendered
+// by interpolating between the two most recent snapshots, slightly in the
+// past, so motion is continuous and never extrapolates beyond what the
+// server has actually confirmed. The local player instead predicts its own
+// movement immediately from input (so input feels instant) and is gently
+// reconciled toward the server's authoritative position each snapshot,
+// snapping instantly only on a real discontinuity (first spawn, a fight
+// starting/ending, or a large correction) rather than sliding through a
+// visibly wrong path. docs/adr/0006-coop-perf-and-reliability.md.
+const INTERP_DELAY_MS = 180; // a bit over one server tick, absorbs normal jitter
+const SNAP_DISTANCE = 80; // px: a correction this big means "teleport", not "smooth it"
+const SELF_CORRECTION_BLEND = 0.3; // fraction of error nudged in per received snapshot
+
+interface Snap {
+  t: number;
+  x: number;
+  y: number;
+}
+function pushSnap(buf: Snap[], s: Snap) {
+  buf.push(s);
+  if (buf.length > 2) buf.shift();
+}
+/** Interpolates between the two most recent snapshots at `at`; never extrapolates past the newest one. */
+function sampleBuffer(buf: Snap[], at: number): { x: number; y: number } | null {
+  if (buf.length === 0) return null;
+  if (buf.length === 1) return { x: buf[0].x, y: buf[0].y };
+  const [a, b] = buf;
+  if (at <= a.t) return { x: a.x, y: a.y };
+  if (at >= b.t) return { x: b.x, y: b.y };
+  const t = (at - a.t) / (b.t - a.t);
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
 interface PlayerView {
   body: ReturnType<typeof makePlayerBody>;
   label: ReturnType<typeof makeLabel>;
+  buf: Snap[];
 }
 interface EnemyView {
   body: ReturnType<typeof makeEnemyBody>;
   hpLabel: ReturnType<typeof makeLabel>;
+  labelOffset: number;
+  buf: Snap[];
 }
 
 const players = new Map<string, PlayerView>();
 const enemies = new Map<string, EnemyView>();
 let selfId = "";
+/** The local player's own displayed/predicted position; null until the first snapshot arrives. */
+let selfPos: { x: number; y: number } | null = null;
+let selfFightId: string | null = null;
 
-function ensurePlayer(id: string, name: string, color: string): PlayerView {
+function ensurePlayer(id: string, name: string, color: string, x: number, y: number): PlayerView {
   let v = players.get(id);
   if (v) return v;
   const body = makePlayerBody(parseColor(color));
+  body.pos = k.vec2(x, y);
   const label = makeLabel(name, -28);
-  v = { body, label };
+  label.pos = k.vec2(x, y - 28);
+  v = { body, label, buf: [] };
   players.set(id, v);
   return v;
 }
 
-function ensureEnemy(id: string, role: string, tier: string): EnemyView {
+function ensureEnemy(id: string, role: string, tier: string, x: number, y: number): EnemyView {
   let v = enemies.get(id);
   if (v) return v;
   const size = ROLE_SIZE[role] ?? 24;
+  const labelOffset = size / 2 + 10;
   const body = makeEnemyBody(role, tier);
-  const hpLabel = makeLabel("", -size / 2 - 10);
-  v = { body, hpLabel };
+  body.pos = k.vec2(x, y);
+  const hpLabel = makeLabel("", -labelOffset);
+  hpLabel.pos = k.vec2(x, y - labelOffset);
+  v = { body, hpLabel, labelOffset, buf: [] };
   enemies.set(id, v);
   return v;
 }
@@ -174,16 +230,35 @@ function parseColor(hex: string) {
   return k.rgb((n >> 16) & 255, (n >> 8) & 255, n & 255);
 }
 
+const rosterNodes = new Map<string, HTMLSpanElement>();
+/** Real display names by id, from `hello`'s member list and every `state` snapshot — never a truncated id. */
+const memberNames = new Map<string, string>();
+function roomMemberName(id: string): string {
+  return memberNames.get(id) ?? id.slice(0, 6);
+}
+
 function applyState(msg: CoopServerMsg & { type: "state" }) {
+  const now = performance.now();
   const seenP = new Set<string>();
   for (const p of msg.players) {
     seenP.add(p.id);
-    const v = ensurePlayer(p.id, p.name, p.color);
-    v.body.pos = k.vec2(p.x, p.y);
-    v.label.pos = k.vec2(p.x, p.y - 28);
+    const v = ensurePlayer(p.id, p.name, p.color, p.x, p.y);
+    pushSnap(v.buf, { t: now, x: p.x, y: p.y });
     v.body.opacity = p.online ? (p.fightId ? 0.6 : 1) : 0.3;
     const tag = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
-    v.label.text = `${p.name}${tag}`;
+    const label = `${p.name}${tag}`;
+    if (v.label.text !== label) v.label.text = label;
+
+    if (p.id === selfId) {
+      const fightChanged = selfFightId !== p.fightId;
+      selfFightId = p.fightId;
+      if (!selfPos || fightChanged || Math.hypot(selfPos.x - p.x, selfPos.y - p.y) > SNAP_DISTANCE) {
+        selfPos = { x: p.x, y: p.y };
+      } else {
+        selfPos.x += (p.x - selfPos.x) * SELF_CORRECTION_BLEND;
+        selfPos.y += (p.y - selfPos.y) * SELF_CORRECTION_BLEND;
+      }
+    }
   }
   for (const [id, v] of players) {
     if (!seenP.has(id)) {
@@ -196,10 +271,10 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
   const seenE = new Set<string>();
   for (const e of msg.enemies) {
     seenE.add(e.id);
-    const v = ensureEnemy(e.id, e.role, e.tier);
-    v.body.pos = k.vec2(e.x, e.y);
-    v.hpLabel.pos = k.vec2(e.x, e.y - (ROLE_SIZE[e.role] ?? 24) / 2 - 10);
-    v.hpLabel.text = e.fightId ? `${e.hp} ⚔` : `${e.hp}`;
+    const v = ensureEnemy(e.id, e.role, e.tier, e.x, e.y);
+    pushSnap(v.buf, { t: now, x: e.x, y: e.y });
+    const hpText = e.fightId ? `${e.hp} ⚔` : `${e.hp}`;
+    if (v.hpLabel.text !== hpText) v.hpLabel.text = hpText;
     v.body.opacity = e.fightId ? 0.5 : 1; // combat itself (phase 3) will replace this with the real fight screen
   }
   for (const [id, v] of enemies) {
@@ -212,29 +287,71 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
 
   const me = msg.players.find((p) => p.id === selfId);
   const others = msg.players.filter((p) => p.id !== selfId);
-  ui.roster.textContent = "";
+  const seenRoster = new Set<string>();
   for (const p of [...(me ? [me] : []), ...others]) {
-    const span = document.createElement("span");
+    seenRoster.add(p.id);
+    let span = rosterNodes.get(p.id);
+    if (!span) {
+      span = document.createElement("span");
+      rosterNodes.set(p.id, span);
+    }
     const status = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
-    span.textContent = p.id === selfId ? `${p.name} (you)${status}` : `${p.name}${status}`;
-    span.style.borderColor = p.online ? p.color : "#4a4a52";
-    ui.roster.appendChild(span);
+    const text = p.id === selfId ? `${p.name} (you)${status}` : `${p.name}${status}`;
+    setText(span, text);
+    const border = p.online ? p.color : "#4a4a52";
+    if (span.style.borderColor !== border) span.style.borderColor = border;
+    ui.roster.appendChild(span); // a no-op move if already in place; never recreated
+  }
+  for (const [id, span] of rosterNodes) {
+    if (!seenRoster.has(id)) {
+      span.remove();
+      rosterNodes.delete(id);
+    }
   }
 }
 
-// ---------- camera: follow self, same fit rule as solo exploration ----------
+// ---------- per-frame render: local prediction, remote interpolation, camera ----------
 
-function updateCamera() {
-  const me = players.get(selfId);
-  if (!me) return;
-  const scale = baseScale();
-  k.setCamScale(scale);
-  const half = { x: k.width() / 2 / scale, y: k.height() / 2 / scale };
-  const cx = Math.min(Math.max(me.body.pos.x, half.x), WORLD_WIDTH - half.x);
-  const cy = Math.min(Math.max(me.body.pos.y, half.y), WORLD_HEIGHT - half.y);
-  k.setCamPos(k.vec2(cx, cy));
+function advanceSelfPrediction(dt: number) {
+  if (!selfPos || selfFightId) return; // fighting: the server owns position, nothing to predict
+  const d = currentDir();
+  const len = Math.hypot(d.x, d.y);
+  if (len === 0) return;
+  selfPos.x += (d.x / len) * PLAYER_SPEED * dt;
+  selfPos.y += (d.y / len) * PLAYER_SPEED * dt;
+  selfPos.x = Math.min(Math.max(selfPos.x, PLAYER_EDGE), WORLD_WIDTH - PLAYER_EDGE);
+  selfPos.y = Math.min(Math.max(selfPos.y, PLAYER_EDGE), WORLD_HEIGHT - PLAYER_EDGE);
 }
-k.onUpdate(updateCamera);
+
+function renderFrame() {
+  const dt = k.dt();
+  advanceSelfPrediction(dt);
+  const renderAt = performance.now() - INTERP_DELAY_MS;
+
+  for (const [id, v] of players) {
+    const p = id === selfId ? selfPos : sampleBuffer(v.buf, renderAt);
+    if (!p) continue;
+    v.body.pos = k.vec2(p.x, p.y);
+    v.label.pos = k.vec2(p.x, p.y - 28);
+  }
+  for (const [, v] of enemies) {
+    const p = sampleBuffer(v.buf, renderAt);
+    if (!p) continue;
+    v.body.pos = k.vec2(p.x, p.y);
+    v.hpLabel.pos = k.vec2(p.x, p.y - v.labelOffset);
+  }
+
+  const me = selfPos;
+  if (me) {
+    const scale = baseScale();
+    k.setCamScale(scale);
+    const half = { x: k.width() / 2 / scale, y: k.height() / 2 / scale };
+    const cx = Math.min(Math.max(me.x, half.x), WORLD_WIDTH - half.x);
+    const cy = Math.min(Math.max(me.y, half.y), WORLD_HEIGHT - half.y);
+    k.setCamPos(k.vec2(cx, cy));
+  }
+}
+k.onUpdate(renderFrame);
 
 // ---------- input: direction intent sent to the server, which owns position ----------
 
@@ -311,6 +428,49 @@ function intentLabel(intent: CoopFightMsg["enemies"][number]["intent"]): string 
   return `revive ${intent.target}`;
 }
 
+/**
+ * Keyed node reuse: existing elements are updated and moved into place
+ * (a no-op if already there), never torn down and rebuilt, so repeated
+ * renders (every `fight`/`hand` message) don't thrash click/focus state or
+ * do needless DOM work. `nodes` is the per-list reuse cache the caller keeps
+ * across calls.
+ */
+function syncList<T>(
+  container: HTMLElement,
+  items: T[],
+  keyOf: (t: T) => string,
+  nodes: Map<string, HTMLElement>,
+  build: () => HTMLElement,
+  update: (el: HTMLElement, t: T) => void,
+) {
+  const seen = new Set<string>();
+  for (const item of items) {
+    const key = keyOf(item);
+    seen.add(key);
+    let el = nodes.get(key);
+    if (!el) {
+      el = build();
+      nodes.set(key, el);
+    }
+    update(el, item);
+    container.appendChild(el);
+  }
+  for (const [key, el] of nodes) {
+    if (!seen.has(key)) {
+      el.remove();
+      nodes.delete(key);
+    }
+  }
+}
+
+const enemyNodes = new Map<string, HTMLElement>();
+const partyNodes = new Map<string, HTMLElement>();
+const handNodes = new Map<string, HTMLElement>();
+
+function setHtml(el: HTMLElement, html: string) {
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+
 function renderFight() {
   const f = currentFight;
   if (!f) {
@@ -321,51 +481,84 @@ function renderFight() {
   const me = f.players.find((p) => p.id === selfId);
   setText(ui.fightTurn, `Turn ${f.turn}${me?.ready ? " · waiting on your party…" : ""}`);
 
-  ui.enemyList.textContent = "";
-  for (const e of f.enemies) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.disabled = e.downed;
-    btn.setAttribute("aria-pressed", String(selectedTargetKey === e.key));
-    const targetsMe = e.intent?.kind === "attack" && e.intent.targetId === selfId;
-    btn.innerHTML = `<span class="name">${e.role}${e.downed ? " (down)" : ""}</span><br>HP ${e.hp}/${e.maxHp}<br>${intentLabel(e.intent)}${targetsMe ? " → you" : ""}`;
-    btn.onclick = () => {
-      selectedTargetKey = selectedTargetKey === e.key ? null : e.key;
-      renderFight();
-    };
-    ui.enemyList.appendChild(btn);
-  }
+  syncList(
+    ui.enemyList, f.enemies, (e) => e.key, enemyNodes,
+    () => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      return btn;
+    },
+    (el, e) => {
+      const btn = el as HTMLButtonElement;
+      btn.disabled = e.downed;
+      btn.setAttribute("aria-pressed", String(selectedTargetKey === e.key));
+      const targetName = e.intent?.kind === "attack" ? roomMemberName(e.intent.targetId) : null;
+      setHtml(
+        btn,
+        `<span class="name">${e.role}${e.downed ? " (down)" : ""}</span><br>HP ${e.hp}/${e.maxHp}<br>${intentLabel(e.intent)}${targetName ? ` → ${targetName}` : ""}`,
+      );
+      btn.onclick = () => {
+        selectedTargetKey = selectedTargetKey === e.key ? null : e.key;
+        renderFight();
+      };
+    },
+  );
 
-  ui.partyList.textContent = "";
-  for (const p of f.players) {
-    const span = document.createElement("span");
-    span.className = p.ready ? "ready" : "";
-    const who = p.id === selfId ? "you" : p.id.slice(0, 6);
-    span.textContent = `${who}: ${p.downed ? "down" : p.fled ? "fled" : `${p.hp} HP${p.block ? ` +${p.block} blk` : ""}`}${p.ready ? " ✓" : ""}`;
-    ui.partyList.appendChild(span);
-  }
+  syncList(
+    ui.partyList, f.players, (p) => p.id, partyNodes,
+    () => document.createElement("span"),
+    (el, p) => {
+      el.className = p.ready ? "ready" : "";
+      const who = p.id === selfId ? "you" : roomMemberName(p.id);
+      setText(
+        el,
+        `${who}: ${p.downed ? "down" : p.fled ? "fled" : `${p.hp} HP${p.block ? ` +${p.block} blk` : ""}`}${p.ready ? " ✓" : ""}`,
+      );
+    },
+  );
 
   const myHandEnabled = !!me && !me.downed && !me.fled && !me.ready;
-  ui.hand.textContent = "";
-  for (const c of currentHand?.cards ?? []) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.disabled = !myHandEnabled || (currentHand?.energy ?? 0) < c.cost;
-    btn.innerHTML = `<span class="name">${c.name}</span><span class="cost">${c.cost} energy</span>`;
-    btn.title = c.blurb;
-    btn.onclick = () => {
-      if (c.kind === "single" && !selectedTargetKey) {
-        setText(ui.fightError, "select an enemy first");
-        return;
-      }
-      setText(ui.fightError, "");
-      sendAction({ type: "playCard", seq: nextSeq(), cardInstanceId: c.id, targetKey: c.kind === "single" ? selectedTargetKey! : undefined });
-      selectedTargetKey = null;
-    };
-    ui.hand.appendChild(btn);
-  }
+  syncList(
+    ui.hand, currentHand?.cards ?? [], (c) => c.id, handNodes,
+    () => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      return btn;
+    },
+    (el, c) => {
+      const btn = el as HTMLButtonElement;
+      btn.disabled = !myHandEnabled || (currentHand?.energy ?? 0) < c.cost;
+      btn.title = c.blurb;
+      setHtml(btn, `<span class="name">${c.name}</span><span class="cost">${c.cost} energy</span>`);
+      btn.onclick = () => {
+        if (c.kind === "single" && !selectedTargetKey) {
+          setText(ui.fightError, "select an enemy first");
+          return;
+        }
+        setText(ui.fightError, "");
+        sendAction({ type: "playCard", seq: nextSeq(), cardInstanceId: c.id, targetKey: c.kind === "single" ? selectedTargetKey! : undefined });
+        selectedTargetKey = null;
+      };
+    },
+  );
   ui.endTurnBtn.disabled = !myHandEnabled;
   ui.fleeBtn.disabled = !myHandEnabled;
+}
+
+let fightRenderScheduled = false;
+/**
+ * The server sends a `fight` view and a `hand` view back-to-back for a
+ * single action (server/coop/ws.ts's afterFightChange/tickAll); coalescing
+ * both into one rAF-scheduled render avoids doing the work (and the DOM
+ * diffing above) twice for one logical update.
+ */
+function scheduleRenderFight() {
+  if (fightRenderScheduled) return;
+  fightRenderScheduled = true;
+  requestAnimationFrame(() => {
+    fightRenderScheduled = false;
+    renderFight();
+  });
 }
 
 function setText(el: HTMLElement, text: string) {
@@ -392,14 +585,16 @@ async function main() {
     const msg = JSON.parse(ev.data) as CoopServerMsg;
     if (msg.type === "hello") {
       selfId = msg.selfId;
+      for (const m of msg.room.members) memberNames.set(m.id, m.name);
     } else if (msg.type === "state") {
       applyState(msg);
+      for (const p of msg.players) memberNames.set(p.id, p.name);
     } else if (msg.type === "fight") {
       currentFight = msg;
-      renderFight();
+      scheduleRenderFight();
     } else if (msg.type === "hand") {
       currentHand = msg;
-      renderFight();
+      scheduleRenderFight();
     } else if (msg.type === "fightEnded") {
       currentFight = null;
       currentHand = null;
@@ -419,6 +614,9 @@ async function main() {
     enemies: [...enemies.keys()],
     fight: currentFight,
     hand: currentHand,
+    // exposed for perf measurement only (tools/coop-perf-check.mjs): where the
+    // local player is actually rendered right now, not a behavior change.
+    selfPos: players.get(selfId) ? { x: players.get(selfId)!.body.pos.x, y: players.get(selfId)!.body.pos.y } : null,
   });
 }
 
