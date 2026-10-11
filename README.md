@@ -63,19 +63,21 @@ world from your solo save. You see each other move on one real shared map;
 walking close to a camp together pulls in anyone within 320px of whoever
 actually triggered it (further-off teammates stay free to explore, or start
 their own fight elsewhere). The fight itself runs on the server: everyone
-keeps their own hand and HP, nobody's cards resolve until everyone still
-standing has ended their turn, and fleeing or falling is a personal choice
-that doesn't end the fight for the rest of the party. A disconnect mid-fight
-gets 30 seconds to reconnect before it's resolved as an ordinary, costed
-flee. *Enforced:* `src/roam.test.ts`, `src/encounter.test.ts`,
-`src/combat.test.ts`, `server/coop/room.test.ts`,
-`server/coop/fight-session.test.ts`. *Not yet judged by play*: which player
-an unaimed attack picks (currently the lowest-HP one) is a first guess, not
-a tested one.
+keeps their own hand and HP and plays cards independently, resolved the
+instant each is played; once everyone still standing has ended their turn,
+the enemies act once from their shown intents. Fleeing or falling is a
+personal choice that doesn't end the fight for the rest of the party, and a
+disconnect mid-fight gets 30 seconds to reconnect before it's resolved as an
+ordinary, costed flee — including a server restart, which resumes an
+in-progress fight exactly (same hands, energy and round) rather than losing
+it. *Enforced:* `src/roam.test.ts`, `src/encounter.test.ts`,
+`src/combat.test.ts`, `src/formation.test.ts`, `server/coop/room.test.ts`,
+`server/coop/fight-session.test.ts`. Movement smoothness is measured (not a
+pass/fail test) with `tools/coop-perf-check.mjs`. *Not yet judged by play*:
+which player an unaimed attack picks (currently the lowest-HP one) is a
+first guess, not a tested one.
 
-Not built yet: accounts, loot, talents, art, and mid-fight persistence (a
-server restart during an active co-op fight currently loses that fight's
-progress rather than resuming it).
+Not built yet: accounts, loot, talents, art.
 
 ## Where these ideas came from
 

@@ -111,28 +111,23 @@ escape and never a silent permanent stall for the rest of the party.
 
 ## Costs
 
-- **An active fight's turn/hand/energy state is not persisted.** Shared
-  exploration (positions, enemy roam state) is checkpointed to SQLite on a
-  debounce, same spirit as single-player's "stable moments" rule. A fight in
-  progress is not: a server crash or redeploy mid-fight loses that fight's
-  state, and the affected enemies/players simply resume from their last
-  pre-fight values once the room reloads — not replayed, not duplicated, just
-  dropped. This is consistent with the project's existing refusal to save
-  "half a resolve," but it's a real gap against the brief's "confirmed combat
-  results must survive a restart" bar, and is the clearest candidate for a
-  follow-up.
-- **Visual polish is deliberately behind the mechanics.** The co-op client
-  (`coop.html`/`src/coop-main.ts`) renders players and enemies as plain
-  shapes and runs the fight through a functional but unstyled HTML card dock,
-  not the single-player client's formation layout, camera framing or card
-  art. The rules it's driven by are the real, server-authoritative ones;
-  the presentation is not held to the same bar as `README.md`'s promises for
-  solo play yet.
 - **One attack-target rule, unconfirmed.** See the draft note above.
 - **No horizontal scaling.** Room state lives in one Node process's memory
   (per ADR 0001's existing single-machine constraint); this was already true
   for the whole app and co-op doesn't change it, but it now also bounds how
   many concurrent rooms one instance can usefully tick.
+
+**Superseded by [ADR 0006](0006-coop-perf-and-reliability.md):** the two
+costs originally listed here — "an active fight's turn/hand/energy state is
+not persisted" and "visual polish is deliberately behind the mechanics" —
+no longer hold as stated. A real player's first session surfaced both as
+actual problems (a stuck enemy after a crash; a reported "very low
+framerate"), and the follow-up round fixed the underlying causes rather than
+documenting them as permanent gaps: fight state is now fully persisted
+(serialize/restore, see ADR 0006), and the fight view now reuses
+`src/formation.ts`'s real slot/camera layout instead of raw overlapping
+positions. What's still true: the attack-target rule is unplayed, and there's
+still no horizontal scaling.
 
 ## Verification at the time of the decision
 
