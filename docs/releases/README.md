@@ -8,6 +8,9 @@ Stage implementation evidence belongs in the
   agent-driven release checks performed that day.
 - The process tools first prepared on 7 October 2026 are later work. They are
   not part of the Crit 8 release or its tag above.
+- [Co-op reaches production: 11 October 2026](2026-10-11-coop-deploy.md) is the
+  first release to include any co-op code; `/coop.html` was 404 on the live
+  site before it.
 
 ## Release record template
 
