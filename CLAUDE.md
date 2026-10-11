@@ -141,6 +141,8 @@ node tools/playtest.mjs --suite=monsters,groups   # packs, revive, elite cycle; 
 node tools/playtest.mjs --suite=roam   # wandering, pull-away, Warlord homing, guards apart, saved places
 node tools/balance.ts [runs]           # whole runs with the real rules: must stay winnable
 sh tools/persistence-check.sh       # saves survive restart and rebuild (Docker)
+node tools/coop-live-check.mjs      # real WS co-op: independent cards, reconnect seq, individual flee (no restart needed; also runs in CI)
+sh tools/coop-restart-check.sh      # co-op fight state survives restart and rebuild (Docker, named volume): fight-id collisions, a fled player not re-locked, legacy fight-row formats, a killed enemy staying dead
 pnpm check:evidence
 ```
 

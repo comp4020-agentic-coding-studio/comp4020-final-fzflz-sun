@@ -48,6 +48,16 @@ jobs:
           SHOTS: artifacts/browser
       - name: Verify the production page and save API
         run: pnpm check:deploy -- http://localhost:8080/
+      - name: Play a real co-op session against the production image
+        # Two real WebSocket clients: independent cards/common end-turn,
+        # a reconnect's action-seq stays valid, one flees while the other
+        # continues. Restart-dependent co-op scenarios (fight persistence,
+        # fight-id collisions, legacy-format compat) are NOT run here: this
+        # job's container uses --tmpfs /data, which does not survive a
+        # `docker restart` (confirmed directly in this project), so a
+        # restart test here would prove nothing — see tools/coop-restart-check.sh,
+        # run locally/pre-release instead, same as tools/persistence-check.sh.
+        run: pnpm check:coop http://localhost:8080
       - name: Keep browser screenshots and results
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
