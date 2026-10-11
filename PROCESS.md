@@ -1,154 +1,138 @@
-# Process overview
+# Process overview — Crit 9
 
-This describes the project at crit 8; it is rewritten, not appended to, at
-crits 9 and 10.
+Updated 11 October 2026 (Australia/Sydney), from repository state
+`104e580`. This is an author-review draft assembled with Codex from the
+recorded design discussion, commits and checks. Personal judgments need the
+author's review; agent verification is labelled separately.
 
 ## From the brief to this game
 
-The brief asks for a multi-user, real-time website that's good, and says
-small is fine. I started from a game I'd want to open for ten minutes: a
-top-down map where you choose how many enemies to pull into a fight, then
-settle it with a hand of cards. The question that kept recurring in playtests
-was *what does the player get to think about, and what takes that away from
-them?* That became the README's promises and then the rules in `CLAUDE.md`.
+[Crit 9](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/crits/09-all-at-once/)
+asks for real-time shared use and a justified decision about simultaneous
+users. Camp Clearer answers with shared exploration and tactical card
+encounters. My interest in Diablo is especially random equipment and
+character growth. That clarified the direction: encounters should support
+tactical choices and future progression, rather than increasing enemy
+counts indefinitely. Loot and talents are still future work.
 
-Multi-user and real-time aren't in this version. Crit 8 asks for proof of
-life: a stranger can play and return to find their progress. Shared play is
-crit 9's work.
+I rejected shared contribution counters because they did not give players
+enough influence over each other. Repeated battle invitations would also
+interrupt exploration. The accepted rule uses positioning: a nearby friend
+automatically fights with you; a distant friend keeps exploring. The
+[curated discussion and review](docs/process/2026-10-11-c9-documentation-review.md)
+records that direction without claiming it was already validated by players.
 
-## Stack, and what it costs
+## The foundation carried forward
 
-The game is a Kaplay canvas client built with Vite and TypeScript, served by
-one small Node process that also stores saves in SQLite on the Fly volume.
-Reasons and trade-offs: [ADR 0001](docs/adr/0001-stack.md) (stack),
-[ADR 0002](docs/adr/0002-checkpoint-saves.md) (saves),
-[ADR 0003](docs/adr/0003-monster-roles-and-packs.md) (monster roles) and
-[ADR 0004](docs/adr/0004-roaming-and-places.md) (roaming). In short: the game
-owns its own loop, so a page framework would add little, and `node:sqlite`
-(Node 24) needs no native dependency, keeping the image at about 50 MB on a
-256 MB machine. The cost is hand-written routing and cookies, which is why
-they have their own live tests.
+Crit 8 established strict turns, readable enemy intents and persistent
+anonymous saves. Play had exposed timed attacks that punished reading and
+crowds that obscured intentions. Those corrections became the phase gate,
+formation rules and browser checks. The recorded baseline is
+[`e993867`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/e993867);
+early versions were uncommitted, so their evolution cannot be reconstructed
+as a sequence of diffs. Monster roles and roaming followed in
+[`c592810`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c592810)
+and [`8e1ddc9`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/8e1ddc9).
+The [C8 reflection](reflections/crit-8.md) remains unchanged.
 
-One decision changed mid-work: the HUD and hand were canvas text on a fixed
-960x540 picture, which only shrinks on a phone, so they moved to HTML over a
-full-window canvas, and formation now measures the space the HTML actually
-leaves
-([`8b1400e`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/8b1400e)).
+## Stack and the multiplayer decision
 
-## How I work with the agent
+Kaplay, Vite and TypeScript handle presentation; one Node process serves
+HTTP and WebSockets. SQLite uses the existing Fly volume on the fixed
+256 MB machine. This reuses the stack and pure rule modules instead of
+adding another backend. The cost is responsibility for connection identity,
+ordering, recovery and memory use. [ADR 0001](docs/adr/0001-stack.md) and
+[ADR 0005](docs/adr/0005-coop-multiplayer.md) explain those choices.
 
-I worked in numbered versions, each from a spec (in Chinese) saying what to
-build and verify. The agent (Claude Code) built it and reported, I played
-it, and the next spec came from what felt wrong. I didn't review diffs line
-by line; I reviewed by playing, and asked for evidence per claim: test
-runs, screenshots, browser checks.
+Each room has one authoritative map and enemy population; each member has
+personal HP, energy and cards. Separate co-op storage protects solo saves.
+A 320-world-unit radius around the triggering player determines eligible
+teammates once, without chaining through other players. Camera visibility
+was considered, but viewport size and zoom would make identical positions
+behave differently across devices. Distant members can start another
+encounter; enemies cannot belong to two fights.
 
-The early versions (v1 to v4) were built in the working tree and never
-committed, which I regret: there's no diff showing how v1-v2's real-time
-combat became the turn-based system that followed. The first recorded state
-is the v5 baseline
-([`e993867`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/e993867)),
-whose message says what came before rather than pretending to be the start.
-Since then each piece of work is its own commit: server and saves
-([`fbd8be4`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/fbd8be4)),
-restore and phone UI
-([`8b1400e`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/8b1400e)),
-the production image
-([`c671e3e`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c671e3e)),
-live checks
-([`d4dd13a`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/d4dd13a)),
-the README
-([`cd6e287`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/cd6e287)),
-the fight-joining rule
-([`cb9104b`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/cb9104b)),
-ordered save writes
-([`faa8144`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/faa8144)),
-monster roles and packs
-([`c592810`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c592810),
-[`a040ea2`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/a040ea2)),
-and free-roaming enemies
-([`8e1ddc9`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/8e1ddc9),
-[`bf5cc41`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/bf5cc41)).
+Cards resolve individually on the server. All active participants must
+finish their player phase before enemies execute their displayed actions
+once. Flee is personal and still costs the shown enemy actions. These
+mechanisms grew through
+[`a1d639a...12c6e3b`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/compare/a1d639a...12c6e3b).
+The lowest-HP attack-target rule is a provisional design choice, not
+evidence of enjoyable cooperation.
 
-## Where playing and review corrected the agent
+## How the agents were directed and corrected
 
-Each correction landed in a rule or a check, not just a retry.
+I used Codex to discuss choices, inspect the repository and prepare
+implementation prompts; Claude Code implemented the stages. My feedback
+set the next acceptance scenarios. Rule tests, browser checks and production
+checks supplied different evidence. The
+[working process](docs/process/README.md) separates these jobs and records
+unfinished work explicitly.
 
-- **v1 let you move during combat.** It played like an action grinder, not a
-  card game. Combat now locks you in place, which became the first rule in
-  `CLAUDE.md`.
-- **v3 kept enemies attacking on a timer while I read my hand.** Thinking
-  cost HP. v4 made combat strict turns. The phase machine in `src/turn.ts` is
-  the single gate for input, and its tests plus a browser check that two idle
-  seconds change nothing hold that line.
-- **Crowds stacked bodies, HP and intents on top of each other.** v5 added
-  chase separation and a short formation step into readable slots, checked
-  by `src/formation.test.ts` at every crowd size, map corners and both
-  marking viewports.
-- **A lethal card wiped the rest of my hand,** and Focus vanished for good
-  after one use. I found both by reading the code, not by playing: my v5 spec
-  named the exact functions at fault. The fix settles a card fully before
-  checking for victory and gives exhaust a per-fight pile, checked by
-  `src/cards.test.ts` across 300 random fights.
-- **The agent reported v5 as done, and it didn't run.** A custom field name
-  clashed with Kaplay's own, and the game crashed on load with typecheck and
-  build both green. The agent then built `tools/playtest.mjs`, a real Chrome
-  that fails on any page error, which immediately caught a second crash the
-  same way. "Client work isn't done until it runs in a browser" is now in
-  `CLAUDE.md`.
-- **The fight camera framed itself before the HUD finished growing,**
-  zooming out to its floor for a player in a map corner. Browser layout
-  checks caught it, not my eyes; the fix re-frames on any layout change.
-- **Starting a new run could beat the last save.** I never hit this live; I
-  found it by reasoning through `SaveClient`'s request order and named the
-  exact failure: a victory still in flight could lose to New run, archiving
-  the run as abandoned instead of won. Every write now goes through one
-  ordered queue; `src/net.test.ts` holds requests in each completion order.
-- **Enemies never moved except toward me, or changed after a chase.** The
-  map felt static, and "splitting a pack" had no lasting effect. Enemies now
-  wander, and grunts and elites settle where they give up instead of
-  snapping home; the boss still returns to its fixed lair.
-  `src/roam.test.ts` covers the wandering, the give-up conditions and the
-  boss's homing, including across a save/reload.
-- **The words drifted from the code.** The README said every chaser joins a
-  fight; the code takes only chasers within 260 px. The words now match, and
-  `src/encounter.test.ts` holds the rule.
+Two actual reports redirected C9: I could not find multiplayer, and
+movement felt like very low framerate. Codex's code review separately
+identified refresh sequencing, individual flee notification, replacement
+socket handling and orphaned engaged enemies. Those were review findings,
+not four bugs I personally reproduced. The resulting prompt required
+specific failure scenarios and measurement before tuning.
 
-## What the checks protect
+The performance fix
+[`ec65456`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/ec65456)
+followed recorded local measurements: rAF intervals averaged 16.67 ms
+before and after, but displayed position changed every 8.78 frames before
+and 1.02 afterward. The fix added local movement prediction, remote
+interpolation and DOM reuse; server updates remained 150 ms apart.
+[Preserved samples](docs/process/evidence/coop-perf-baseline.json) and
+[after samples](docs/process/evidence/coop-perf-after-phaseB.json) support
+that narrower finding. They do not establish smoothness on a phone or
+a lossy real network.
 
-`pnpm check` runs the course's two HTTP checks, my live save checks and the
-game-rule tests against the running app, as CI will once the repo is public.
-`tools/playtest.mjs` plays a stranger's whole session on the real image —
-start, fight by tapping, saved, reload, restored — checks that a second
-visitor can't overwrite the first, covers both marking viewports and a
-resize mid-fight, and starts a run on a slow or offline connection.
-`tools/persistence-check.sh` shows saves surviving a container restart and a
-rebuilt image on the same volume.
+[`3c658ca`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/3c658ca)
+added fight persistence, sequence recovery, personal exit messages and
+connection generations.
+[`15d5b39`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/15d5b39)
+made entry points prominent and added touch movement, reconnect and shared
+formation support. A further restart check found enemies' alive/dead
+status was absent from persistence;
+[`bbaee09`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/bbaee09)
+added it. A passing earlier stage had therefore left a real gap.
 
-The tests can't tell me whether a fight is interesting — whether pulling
-three grunts is a real choice, or the boss's charge feels answerable. Those
-promises are marked *judged* in the README, and I judge them by playing.
+## What the evidence establishes
 
-## What I chose not to build
+The [reliability stage record](docs/process/2026-10-11-coop-reliability-and-perf.md)
+reports 393 passing tests, real connection/restart checks, and desktop and
+phone-emulated browser sessions against development and production Docker.
+These are earlier agent-run checks, not checks rerun while writing this
+overview. Some reproductions remain ignored local scripts; they are not
+all reusable CI gates. Performance JSON was preserved during this
+documentation review; its original files have no embedded revision metadata.
 
-No accounts: a cookie per browser is enough for friends. No leaderboard,
-loot, talents or real art yet. Closing the tab mid-fight undoes that fight —
-a known soft exploit the game states rather than hides.
+The first co-op release deployed
+[`bb8d93d`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/bb8d93d)
+through [workflow 38127922180](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/38127922180).
+The [release record](docs/releases/2026-10-11-coop-deploy.md), committed in
+[`104e580`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/104e580),
+reports live two-browser exploration. Its own subsequent workflow also
+succeeded. A local deploy verifier's `sourceRevision` identifies the
+checking checkout, not a server-returned build fingerprint. CI provenance
+and live behaviour are separate evidence.
 
-## Next
+## Remaining boundaries and next work
 
-Crit 9 makes the game multi-user and real-time. The map now has enough going
-on — six camps, packs, a reviving mage, a boss with a lair — that "what does
-another player see and affect" is a real question, not a formality. I
-haven't decided the answer yet, and that comes before any code.
+The 11 October source review found two recovery gaps despite the successful
+restart scenarios: player HP lives in a periodic room snapshot rather than
+the per-action fight snapshot, and restoration clears ready status.
+An abrupt crash between writes could restore stale HP; a pending flee
+could regain an action. These are code-review risks, not newly reproduced
+crash results. They need targeted checks and a persistence correction before
+claiming exact recovery.
 
-## Process tools added after the C8 release (7 October 2026)
+Formation transitions remain simpler than solo, interpolation uses a fixed
+180 ms delay, and multiplayer balance still needs people playing together.
+Live Fly restart and live phone/formation checks were not performed in the
+recorded release. My original feedback concerns the earlier build; no
+post-fix author review or independent player session is recorded.
 
-The [working checklist](docs/process/README.md) provides a short feature
-acceptance card, first-time-player observations and an art sample checklist.
-[Release records](docs/releases/README.md) tie checks and limitations to dated
-commits; the [3 October C8 record](docs/releases/2026-10-03-crit-8.md) is based on
-that session's actual checks, not a reconstruction of earlier development.
-The workflow now includes the production browser session and a page/asset,
-README and isolated-save check. These are regression checks; independent
-playtesting and enjoyment judgments still need real people.
+Next: close the recovery windows, make the critical multiplayer
+reproductions durable checks, and test real-network play before extending
+loot and character progression.

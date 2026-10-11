@@ -1,7 +1,7 @@
 # Release record: co-op reaches production
 
 Release / date / timezone / checker: 2026-10-11, Australia/Sydney, agent-run
-(no human play yet)
+(no human playtest of this deployment is recorded)
 Status: deployed and verified
 Repository: `comp4020-agentic-coding-studio/comp4020-final-fzflz-sun`
 Exact deployed commit: `bb8d93d3a725884ea2198c6bc55763b71bbbc01c`
@@ -36,9 +36,12 @@ built this stage.
 
 - **Automated rules/API checks**: `node scripts/verify-deploy.ts --
   https://comp4020-final-fzflz-sun.fly.dev` — passed (`ok: true`); its own
-  `sourceRevision` field read back `bb8d93d3a7258...`, confirming the live
-  site is actually running this exact commit, not an assumption from the
-  push succeeding.
+  `sourceRevision` field identifies the local checking checkout at
+  `bb8d93d3a7258...`. It is not returned by the server and does not establish
+  the deployed revision by itself. The commit attribution comes from the
+  successful check/deploy workflow at this SHA, alongside observed live
+  behaviour. This interpretation was corrected during the 11 October
+  documentation review; the recorded check result is unchanged.
 - **Production page and referenced assets**: `/` and `/coop.html` both
   return 200 (previously `/coop.html` was 404); `verify-deploy.ts` confirmed
   the referenced JS assets and README images resolve.
@@ -50,8 +53,9 @@ built this stage.
   specifically this release (no Fly-level restart was performed) — restart
   persistence (room state, a mid-fight resume, a killed enemy staying dead)
   was verified against the actual production Docker image locally earlier
-  in this stage, on a real `docker restart`, which is the same image Fly is
-  now running; see this stage's card
+  in this stage, on a real `docker restart`. Those checks establish behaviour
+  of the tested local production image; no image-digest comparison with Fly
+  was performed. See this stage's card
   (`docs/process/2026-10-11-coop-reliability-and-perf.md`) for that
   evidence. `verify-deploy.ts`'s own single-visitor save round trip and
   visitor isolation passed against the live site.
@@ -70,7 +74,8 @@ built this stage.
   release's deploy was built from.
 - `docs/adr/0006-coop-perf-and-reliability.md` — the architecture/causes
   this release implements.
-- GitHub Actions run: `38127922180` on the `checks` workflow.
+- [GitHub Actions run 38127922180](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/38127922180)
+  on the `checks` workflow.
 
 ## Local evidence that is not published
 
@@ -91,12 +96,28 @@ are recorded in the stage card's own Correction record table, not here.)
   locally, not a live Fly machine restart/redeploy cycle).
 - Mobile/phone and formation/camera checks were not re-pointed at the live
   Fly URL this release (they passed against the dev server and the
-  production Docker image, which is the same image now deployed).
-- No human has played the live deployment yet — all verification above is
-  agent-run.
+  production Docker image built locally with the updated Dockerfile;
+  identity with Fly's separately built image was not checked).
+- No human playtest of this deployment is recorded — all verification
+  above is agent-run.
 
 ## Later working-tree changes not included in this release
 
 None at the time of this record; the working tree was clean
 (`worktreeDirty: false` per `verify-deploy.ts`'s own output) at the moment
-of verification.
+of verification. Like `sourceRevision`, this field describes the checking
+checkout, not Fly's filesystem.
+
+## Subsequent documentation and verification
+
+The release-record commit `104e580` subsequently triggered
+[workflow 38128190414](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/38128190414),
+which also succeeded. This does not change the identity of the first co-op
+release recorded above.
+
+The [11 October source/documentation review](../process/2026-10-11-c9-documentation-review.md)
+found recovery boundaries not covered by the recorded restart scenarios:
+player HP is stored in a separate periodic room snapshot, ready status is
+reset on restoration, and fight removal and final room state are separate
+writes. These findings limit claims of exact crash recovery; no additional
+Fly restart or human playtest was performed during that review.

@@ -1,0 +1,211 @@
+{
+  "idle": {
+    "host": {
+      "label": "idle",
+      "frameDeltaMs": {
+        "n": 180,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 19,
+        "avg": 150.82,
+        "p95": 151.9,
+        "max": 151.9,
+        "over50": 19
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 0,
+        "avg": 0,
+        "p95": 0,
+        "max": 0,
+        "over50": 0
+      },
+      "posSampleCount": 180
+    },
+    "guest": {
+      "label": "idle",
+      "frameDeltaMs": {
+        "n": 180,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 19,
+        "avg": 150.82,
+        "p95": 152.1,
+        "max": 152.1,
+        "over50": 19
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 0,
+        "avg": 0,
+        "p95": 0,
+        "max": 0,
+        "over50": 0
+      },
+      "posSampleCount": 180
+    }
+  },
+  "moving": {
+    "host": {
+      "label": "moving",
+      "frameDeltaMs": {
+        "n": 222,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 23,
+        "avg": 150.88,
+        "p95": 151.6,
+        "max": 151.9,
+        "over50": 23
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 211,
+        "avg": 1.02,
+        "p95": 1,
+        "max": 5,
+        "over50": 0
+      },
+      "posSampleCount": 222
+    },
+    "guest": {
+      "label": "moving",
+      "frameDeltaMs": {
+        "n": 223,
+        "avg": 16.67,
+        "p95": 16.7,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 23,
+        "avg": 150.89,
+        "p95": 151.6,
+        "max": 151.7,
+        "over50": 23
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 212,
+        "avg": 1.02,
+        "p95": 1,
+        "max": 5,
+        "over50": 0
+      },
+      "posSampleCount": 223
+    }
+  },
+  "enterFight": {
+    "host": {
+      "label": "enterFight",
+      "frameDeltaMs": {
+        "n": 43,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 4,
+        "avg": 150.82,
+        "p95": 151.5,
+        "max": 151.5,
+        "over50": 4
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 30,
+        "avg": 1,
+        "p95": 1,
+        "max": 1,
+        "over50": 0
+      },
+      "posSampleCount": 43
+    },
+    "guest": {
+      "label": "enterFight",
+      "frameDeltaMs": {
+        "n": 42,
+        "avg": 16.67,
+        "p95": 16.7,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 4,
+        "avg": 150.82,
+        "p95": 151.2,
+        "max": 151.2,
+        "over50": 4
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 29,
+        "avg": 1,
+        "p95": 1,
+        "max": 1,
+        "over50": 0
+      },
+      "posSampleCount": 42
+    },
+    "started": true
+  },
+  "combatBurst": {
+    "host": {
+      "label": "combatBurst",
+      "frameDeltaMs": {
+        "n": 178,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 24,
+        "avg": 121.97,
+        "p95": 151.6,
+        "max": 151.7,
+        "over50": 20
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 0,
+        "avg": 0,
+        "p95": 0,
+        "max": 0,
+        "over50": 0
+      },
+      "posSampleCount": 178
+    },
+    "guest": {
+      "label": "combatBurst",
+      "frameDeltaMs": {
+        "n": 177,
+        "avg": 16.67,
+        "p95": 16.8,
+        "max": 16.8,
+        "over50": 0
+      },
+      "stateIntervalMs": {
+        "n": 24,
+        "avg": 121.97,
+        "p95": 151.8,
+        "max": 152.3,
+        "over50": 20
+      },
+      "rafTicksBetweenPosChanges": {
+        "n": 0,
+        "avg": 0,
+        "p95": 0,
+        "max": 0,
+        "over50": 0
+      },
+      "posSampleCount": 177
+    }
+  }
+}
