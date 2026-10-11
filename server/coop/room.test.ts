@@ -189,3 +189,40 @@ describe("CoopRoom: fights form and freeze membership", () => {
     expect(room.fights.get(fight.id)!.playerIds).toEqual(fight.playerIds);
   });
 });
+
+describe("CoopRoom: reserveFightId (avoiding a collision after a restart)", () => {
+  it("a restored fight's id is never reused by the next genuinely new one", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    room.addPlayer("p2", "Birch", "#ff8a65", 0).pos = { x: 2000, y: 1000 };
+    // simulate restoring a fight "f1" without ever calling formFights for it
+    room.reserveFightId("f1");
+    putInEngageRange(room, "lair-boss", "p2");
+    const [fight] = room.formFights(0);
+    expect(fight.id).not.toBe("f1");
+  });
+
+  it("reserving a lower or malformed id never moves the counter backwards or crashes", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    putInEngageRange(room, "west-1", "p1");
+    const [first] = room.formFights(0); // "f1"
+    room.reserveFightId("f1"); // already used, lower than or equal to current counter
+    room.reserveFightId("not-a-fight-id"); // malformed: ignored, not thrown
+    const room2 = new CoopRoom("ABC123", 1);
+    room2.addPlayer("p2", "Birch", "#ff8a65", 1);
+    putInEngageRange(room2, "west-1", "p2");
+    const [second] = room2.formFights(0);
+    expect(first.id).toBe("f1");
+    expect(second.id).toBe("f1"); // a separate room instance: unaffected by the first room's reservations
+  });
+
+  function putInEngageRange(room: CoopRoom, key: string, playerId: string) {
+    const e = room.enemies.find((x) => x.key === key)!;
+    const p = room.players.get(playerId)!;
+    e.state = "chasing";
+    e.targetId = playerId;
+    e.pos = { x: p.pos.x + e.engageRange - 1, y: p.pos.y };
+    return e;
+  }
+});

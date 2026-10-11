@@ -30,6 +30,13 @@ export interface CoopStore {
   putFight(code: string, fightId: string, json: string, now: number): void;
   deleteFight(code: string, fightId: string): void;
   fights(code: string): PersistedFightRow[];
+  /**
+   * A fight's terminal state (win/wipe/abandon): removing its row and
+   * writing the final room snapshot as one atomic commit, so a crash
+   * between the two can never leave "fight row gone, room state stale" or
+   * the reverse. Throws (never silently swallows) if the transaction fails.
+   */
+  finishFight(code: string, fightId: string, roomStateJson: string, now: number): void;
   close(): void;
 }
 
@@ -101,6 +108,20 @@ export function openCoopStore(dataDir: string): CoopStore {
     putFight: (code, fightId, json, now) => void putFight.run(code, fightId, json, now),
     deleteFight: (code, fightId) => void delFight.run(code, fightId),
     fights: (code) => (selFights.all(code) as { fight_id: string; data: string }[]).map((r) => ({ fightId: r.fight_id, data: r.data })),
+    finishFight: (code, fightId, roomStateJson, now) => {
+      // DatabaseSync has no transaction helper, but .exec() runs raw SQL
+      // including BEGIN/COMMIT/ROLLBACK; the two writes themselves still go
+      // through the existing parameterized prepared statements.
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        delFight.run(code, fightId);
+        putState.run(code, roomStateJson, now);
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    },
     close: () => db.close(),
   };
 }

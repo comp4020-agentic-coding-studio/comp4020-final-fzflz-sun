@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { PLAYER_MAX_ENERGY } from "../../src/world.ts";
-import { FightSession } from "./fight-session.ts";
+import { PLAYER_MAX_ENERGY, PLAYER_MAX_HP } from "../../src/world.ts";
+import { FIGHT_PERSIST_VERSION, FightSession, migratePersistedFight } from "./fight-session.ts";
 import { CoopRoom, type RoomFight } from "./room.ts";
 
 function rng(seed: number) {
@@ -326,5 +326,107 @@ describe("FightSession: serialize/restore (a server restart mid-fight)", () => {
     const restored = new FightSession(room, roomFight, rng(9), data);
     expect(restored.isMember("p1")).toBe(false);
     expect(restored.isMember("p2")).toBe(true);
+  });
+
+  it("a downed (not fled) player IS resumed as a member — server/coop/ws.ts's restore loop relies on playerIds to still include them, shown as fallen, unable to act, but not freed", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"], { "west-1": 999 });
+    session.fight.players.find((p) => p.id === "p1")!.hp = 3; // west-1's shown 3-dmg attack will down, not kill the party
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+    expect(session.fight.players.find((p) => p.id === "p1")!.downed).toBe(true);
+    expect(session.isMember("p1")).toBe(true); // still a member, just downed
+    const data = session.serialize();
+
+    const restored = new FightSession(room, roomFight, rng(9), data);
+    // this is exactly the set server/coop/ws.ts's getOrLoadRoom uses to decide who
+    // gets re-locked (fightId set, reconnect timer armed) after a restart — p1 must
+    // still be included (downed, structurally present) even though they can't act.
+    expect(restored.playerIds.sort()).toEqual(["p1", "p2"]);
+    expect(restored.isMember("p1")).toBe(true);
+    const r = restored.applyAction("p1", 2, { type: "endTurn" }, 0, rng(2));
+    expect(r.ok).toBe(false); // downed: can't act
+  });
+});
+
+describe("migratePersistedFight: legacy rows (written between 3c658ca and b2896df, no version/hp/ready)", () => {
+  function legacyRow(overrides: Partial<{ pendingFlee: string[]; players: Record<string, unknown>[] }> = {}) {
+    return {
+      // no `version` field at all: the real compat signal
+      roomFight: { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 },
+      turn: 2,
+      units: [{ key: "west-1", role: "brute", group: "west", maxHp: 6, hp: 6, block: 0, phase: 0, intent: null, downed: false, downedOnTurn: null, revivedThisFight: false, reviveUsed: false }],
+      players: overrides.players ?? [
+        { id: "p1", block: 0, downed: false, fled: false, piles: { draw: [], hand: [], discard: [], exhaust: [] }, handIds: [], energy: 2, lastSeq: 3 }, // no hp, no ready
+        { id: "p2", block: 0, downed: false, fled: false, piles: { draw: [], hand: [], discard: [], exhaust: [] }, handIds: [], energy: 3, lastSeq: 1 },
+      ],
+      pendingFlee: overrides.pendingFlee ?? [],
+    };
+  }
+
+  it("migrates a structurally-valid legacy row to a fully-valid shape: no undefined/NaN anywhere", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "p1", "#fff", 0);
+    room.addPlayer("p2", "p2", "#fff", 0);
+    room.players.get("p1")!.hp = 17; // the room-level snapshot's own value: the documented fallback source
+    const migrated = migratePersistedFight(legacyRow(), room);
+    expect(migrated).not.toBeNull();
+    expect(migrated!.version).toBe(FIGHT_PERSIST_VERSION);
+    for (const p of migrated!.players) {
+      expect(Number.isFinite(p.hp)).toBe(true);
+      expect(typeof p.ready).toBe("boolean");
+    }
+    expect(migrated!.players.find((p) => p.id === "p1")!.hp).toBe(17); // pulled from the room snapshot, not invented
+  });
+
+  it("a legacy player with no room-level HP either falls back to PLAYER_MAX_HP, never undefined/NaN", () => {
+    const room = new CoopRoom("ABC123", 0); // p1/p2 never added: no room-level fallback available
+    const migrated = migratePersistedFight(legacyRow(), room)!;
+    for (const p of migrated.players) expect(p.hp).toBe(PLAYER_MAX_HP);
+  });
+
+  it("a legacy player who had committed to flee (pendingFlee) is restored ready, and can't play another card", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "p1", "#fff", 0);
+    room.addPlayer("p2", "p2", "#fff", 0);
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    for (const e of room.enemies) if (e.key === "west-1") e.state = "engaged";
+
+    const migrated = migratePersistedFight(legacyRow({ pendingFlee: ["p1"] }), room)!;
+    expect(migrated.players.find((p) => p.id === "p1")!.ready).toBe(true);
+
+    const restored = new FightSession(room, roomFight, rng(9), migrated);
+    const r = restored.applyAction("p1", 10, { type: "endTurn" }, 0, rng(2));
+    expect(r.ok).toBe(false); // already readied up per the migrated data
+  });
+
+  it("a legacy player with no flee recorded defaults to not-ready and can still act — the documented limit (a real historical End Turn can't be reconstructed)", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "p1", "#fff", 0);
+    room.addPlayer("p2", "p2", "#fff", 0);
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+
+    const migrated = migratePersistedFight(legacyRow(), room)!;
+    expect(migrated.players.find((p) => p.id === "p1")!.ready).toBe(false);
+    const restored = new FightSession(room, roomFight, rng(9), migrated);
+    const r = restored.applyAction("p1", 10, { type: "endTurn" }, 0, rng(2));
+    expect(r.ok).toBe(true);
+  });
+
+  it("a new-format row (has version/hp/ready already) passes through unaffected by the legacy fallbacks", () => {
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "p1", "#fff", 0);
+    const row = { ...legacyRow({ players: [{ id: "p1", hp: 9, block: 2, downed: false, fled: false, ready: true, piles: { draw: [], hand: [], discard: [], exhaust: [] }, handIds: [], energy: 1, lastSeq: 5 }] }), version: FIGHT_PERSIST_VERSION };
+    const migrated = migratePersistedFight(row, room)!;
+    expect(migrated.players[0]).toMatchObject({ hp: 9, block: 2, ready: true, energy: 1, lastSeq: 5 });
+  });
+
+  it("returns null (not a throw) for structurally broken data, so the caller can fall back to freeing the enemy instead of crashing or wiping the room", () => {
+    const room = new CoopRoom("ABC123", 0);
+    expect(migratePersistedFight(null, room)).toBeNull();
+    expect(migratePersistedFight({}, room)).toBeNull();
+    expect(migratePersistedFight({ roomFight: {}, turn: 1, units: [], players: [], pendingFlee: [] }, room)).toBeNull();
+    expect(migratePersistedFight({ roomFight: { id: "f1", playerIds: [], enemyKeys: [] }, turn: "not a number", units: [], players: [], pendingFlee: [] }, room)).toBeNull();
   });
 });

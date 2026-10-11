@@ -57,4 +57,41 @@ describe("coop store", () => {
     expect(store.getState("ROOM2")).toBeNull();
     store.close();
   });
+
+  it("finishFight: deletes the fight row and writes the final room state as one call, both visible after", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-store-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    store.putFight("ABC123", "f1", '{"turn":1}', 10);
+    expect(store.fights("ABC123")).toHaveLength(1);
+
+    store.finishFight("ABC123", "f1", '{"players":[],"enemies":[]}', 20);
+
+    expect(store.fights("ABC123")).toHaveLength(0); // the fight row is gone
+    expect(store.getState("ABC123")).toBe('{"players":[],"enemies":[]}'); // and the final room state is there
+    store.close();
+  });
+
+  it("finishFight only ever removes the named fight, never a different fight still in progress in the same room", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-store-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    store.putFight("ABC123", "f1", '{"turn":1}', 10);
+    store.putFight("ABC123", "f2", '{"turn":5}', 10);
+
+    store.finishFight("ABC123", "f1", '{"players":[],"enemies":[]}', 20);
+
+    const remaining = store.fights("ABC123");
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].fightId).toBe("f2");
+    store.close();
+  });
+
+  it("finishFight surfaces a real failure rather than silently swallowing it", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-store-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    store.close(); // the underlying connection is now closed
+    expect(() => store.finishFight("ABC123", "f1", "{}", 20)).toThrow();
+  });
 });

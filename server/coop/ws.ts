@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { CoopClientMsg, CoopFightEndedMsg, CoopHelloMsg, CoopLeftFightMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
 import { HttpError, json, parseCookies, readBody } from "../http.ts";
 import { CALM_TIME } from "../../src/roam.ts";
-import { FightSession, type FightAction, type PersistedFight } from "./fight-session.ts";
+import { FightSession, migratePersistedFight, type FightAction } from "./fight-session.ts";
 import { CoopRoom, MEMBER_COLORS, type RoomEnemy } from "./room.ts";
 import { openCoopStore, type CoopStore } from "./store.ts";
 
@@ -146,10 +146,18 @@ export class CoopServer {
     const resumed = new Set<string>();
     for (const row of this.store.fights(code)) {
       try {
-        const data = JSON.parse(row.data) as PersistedFight;
+        const parsed: unknown = JSON.parse(row.data);
+        // a row written by the code that existed between 3c658ca (added fight
+        // persistence) and b2896df (added hp/ready) has neither field, and no
+        // `version` at all — migrate it to a fully-valid shape (or get `null`
+        // back if it's too structurally broken to use), rather than trusting
+        // the raw JSON's shape unconditionally.
+        const data = migratePersistedFight(parsed, room);
+        if (!data) continue; // falls through to the orphan-cleanup pass below
         const rf = data.roomFight;
         if (rf.enemyKeys.some((k) => !room.enemies.find((e) => e.key === k))) continue; // map changed under it: can't resume
         room.fights.set(rf.id, rf);
+        room.reserveFightId(rf.id); // the next genuinely new fight must never reuse this id
         const session = new FightSession(room, rf, Math.random, data);
         this.sessions.set(sessionKey(code, rf.id), session);
         resumed.add(rf.id);
@@ -158,15 +166,21 @@ export class CoopServer {
           e.state = "engaged";
           e.fightId = rf.id;
         }
-        for (const pid of rf.playerIds) {
+        // session.playerIds is the fight's *actual current* membership — it
+        // already excludes anyone who'd successfully fled before the crash
+        // (and includes a downed player, who's still structurally part of the
+        // fight). rf.playerIds is the fight's original, fixed roster, which
+        // never shrinks when someone leaves — using it here would re-lock an
+        // already-fled player back into a fight they're no longer in.
+        for (const pid of session.playerIds) {
           const rp = room.players.get(pid);
           if (rp) rp.fightId = rf.id;
         }
         // Nobody has an open socket right now — this is a cold room load, not a
-        // live disconnect — but the effect for each participant is the same:
-        // give them the normal reconnect window rather than instantly treating
-        // a restart as a mass flee.
-        for (const pid of rf.playerIds) this.armReconnectTimer(room, pid);
+        // live disconnect — but the effect for each actual participant is the
+        // same: give them the normal reconnect window rather than instantly
+        // treating a restart as a mass flee.
+        for (const pid of session.playerIds) this.armReconnectTimer(room, pid);
       } catch {
         // a corrupt fight row: fall through to the orphan-cleanup pass below instead of resuming it
       }
@@ -411,11 +425,34 @@ export class CoopServer {
   /** Pushes the right follow-up views after anything changes a fight's state: client action, or a forced flee. */
   private afterFightChange(room: CoopRoom, fightId: string, session: FightSession, initialMembers: string[]) {
     if (session.ended) {
+      // The fight's terminal state (win/wipe/abandon — one path for all three,
+      // since `finish()` already produced one consistent in-memory shape) must
+      // be durable as a single atomic unit — deleting the fight row and
+      // writing the final room snapshot separately could leave a crash with
+      // "fight gone, room stale" or the reverse — and nobody should be told
+      // it happened before that commit actually succeeds.
+      const now = Date.now();
+      const roomStateJson = JSON.stringify(persist(room));
+      let committed = false;
+      for (let attempt = 0; attempt < 2 && !committed; attempt++) {
+        try {
+          this.store.finishFight(room.code, fightId, roomStateJson, now);
+          committed = true;
+        } catch (e) {
+          if (attempt === 0) continue; // one retry: a local synchronous disk write essentially never fails transiently
+          // Still fails: log loudly rather than silently losing the failure. The
+          // in-memory room/session state is already correct (FightSession.finish()
+          // already applied it), so proceeding to notify is better than leaving
+          // every participant stuck in a fight that's actually over — the
+          // documented risk is a narrow window where a crash right after this
+          // point could still lose the exact persisted final state.
+          console.error(`[coop] finishFight failed for ${room.code}:${fightId} after retry:`, e);
+        }
+      }
+      if (committed) this.lastSaved.set(room.code, now);
       const ended: CoopFightEndedMsg = { type: "fightEnded", fightId: session.id, outcome: session.ended };
       for (const pid of initialMembers) this.sendTo(room, pid, ended);
       this.sessions.delete(sessionKey(room.code, fightId));
-      this.store.deleteFight(room.code, fightId); // nothing left to resume: a restart must not find a ghost of this fight
-      this.persistRoomNow(room); // surviving/dead enemy state and freed players: don't wait for the debounce
     } else {
       // someone who personally left (an individual flee) this round, while the fight
       // itself continues for the rest: they get no fightEnded, so they need their own
@@ -440,12 +477,6 @@ export class CoopServer {
 
   private persistFight(roomCode: string, session: FightSession) {
     this.store.putFight(roomCode, session.id, JSON.stringify(session.serialize()), Date.now());
-  }
-
-  private persistRoomNow(room: CoopRoom) {
-    const now = Date.now();
-    this.lastSaved.set(room.code, now);
-    this.store.putState(room.code, JSON.stringify(persist(room)), now);
   }
 
   private sendTo(room: CoopRoom, playerId: string, msg: CoopServerMsg) {

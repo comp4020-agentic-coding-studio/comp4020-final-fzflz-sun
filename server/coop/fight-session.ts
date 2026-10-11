@@ -33,7 +33,7 @@ import {
 import type { CoopCardView, CoopFightEnemyView, CoopFightMsg, CoopFightPlayerView, CoopHandMsg, CoopIntentView } from "../../src/coop-protocol.ts";
 import { drawHand, drawOne, discardHand, newPiles, settlePlayed, takeFromHand, type CardDef, type Piles, HAND_SIZE } from "../../src/cards.ts";
 import { settleAfterFlee } from "../../src/roam.ts";
-import { PLAYER_MAX_ENERGY, WORLD_HEIGHT, WORLD_WIDTH } from "../../src/world.ts";
+import { PLAYER_MAX_ENERGY, PLAYER_MAX_HP, WORLD_HEIGHT, WORLD_WIDTH } from "../../src/world.ts";
 import type { CoopRoom, RoomEnemy, RoomFight } from "./room.ts";
 
 export type FightOutcome = "won" | "wiped" | "abandoned";
@@ -85,6 +85,13 @@ export interface PersistedFightPlayer {
   lastSeq: number;
 }
 export interface PersistedFight {
+  /**
+   * Stamped by serialize(); its *absence* (not merely a missing `hp`/
+   * `ready` field) is what migratePersistedFight() below treats as "this
+   * predates versioning and needs migration" — a real compat signal, not
+   * silent field-presence duck-typing.
+   */
+  version: number;
   roomFight: RoomFight;
   turn: number;
   units: CombatUnit[];
@@ -92,10 +99,77 @@ export interface PersistedFight {
   pendingFlee: string[];
 }
 
+/** Bumped only if PersistedFight's shape changes again in a way that needs its own migration branch. */
+export const FIGHT_PERSIST_VERSION = 1;
+
 const EMPTY_PILES: Piles = { draw: [], hand: [], discard: [], exhaust: [] };
 
 let cardIdN = 1;
 const newCardId = () => `card${cardIdN++}`;
+
+/**
+ * A fight row read back from server/coop/store.ts's `fights` table may
+ * predate `version`/`hp`/`ready` entirely (anything written by the code
+ * that existed between commit 3c658ca, which added fight persistence, and
+ * b2896df, which added those fields) — restoring it with those fields
+ * unconditionally would write `undefined` straight into live combat state.
+ * This migrates such a row to a fully-valid PersistedFight, or returns
+ * `null` if the data is too structurally broken to use at all (the caller
+ * then falls back to freeing that fight's enemies back to roaming via the
+ * existing orphan-cleanup path — never wiping the whole room over one bad
+ * row).
+ */
+export function migratePersistedFight(raw: unknown, room: CoopRoom): PersistedFight | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const roomFight = r.roomFight as RoomFight | undefined;
+  if (!roomFight || typeof roomFight.id !== "string" || !Array.isArray(roomFight.playerIds) || !Array.isArray(roomFight.enemyKeys)) return null;
+  if (typeof r.turn !== "number" || !Array.isArray(r.units) || !Array.isArray(r.players) || !Array.isArray(r.pendingFlee)) return null;
+
+  const pendingFlee = (r.pendingFlee as unknown[]).filter((p): p is string => typeof p === "string");
+  const players: PersistedFightPlayer[] = (r.players as Record<string, unknown>[]).map((p) => {
+    const id = String(p.id);
+    let hp = typeof p.hp === "number" && Number.isFinite(p.hp) ? p.hp : undefined;
+    if (hp === undefined) {
+      // the room-level snapshot (already restored by the time this runs, in
+      // server/coop/ws.ts's getOrLoadRoom) is the best explicit, documented
+      // source for a legacy row's missing HP — never undefined/NaN, and
+      // never a silently-assumed full heal.
+      const roomHp = room.players.get(id)?.hp;
+      hp = typeof roomHp === "number" && Number.isFinite(roomHp) ? roomHp : PLAYER_MAX_HP;
+    }
+    let ready = typeof p.ready === "boolean" ? p.ready : undefined;
+    if (ready === undefined) {
+      // a legacy row's own `pendingFlee` predates hp/ready and is accurate:
+      // a player who'd committed to flee is correctly restored unable to
+      // act again. Anyone else defaults to not-ready — an honest, documented
+      // limit, since a real historical End Turn can't be reconstructed from
+      // data that never recorded it.
+      ready = pendingFlee.includes(id);
+    }
+    return {
+      id,
+      hp,
+      block: typeof p.block === "number" && Number.isFinite(p.block) ? p.block : 0,
+      downed: p.downed === true,
+      fled: p.fled === true,
+      ready,
+      piles: (p.piles as Piles) ?? EMPTY_PILES,
+      handIds: Array.isArray(p.handIds) ? (p.handIds as string[]) : [],
+      energy: typeof p.energy === "number" && Number.isFinite(p.energy) ? p.energy : 0,
+      lastSeq: typeof p.lastSeq === "number" && Number.isFinite(p.lastSeq) ? p.lastSeq : 0,
+    };
+  });
+
+  return {
+    version: FIGHT_PERSIST_VERSION,
+    roomFight,
+    turn: r.turn as number,
+    units: r.units as CombatUnit[],
+    players,
+    pendingFlee,
+  };
+}
 
 /** A live view of one RoomPlayer, shaped like combat.ts's FightPlayer (no `id` collision risk here: this is a plain server object, not a Kaplay entity). */
 function fightPlayerAdapter(rp: { id: string; hp: number; block: number }): FightPlayer {
@@ -214,6 +288,7 @@ export class FightSession {
       };
     });
     return {
+      version: FIGHT_PERSIST_VERSION,
       roomFight,
       turn: this.fight.turn,
       units: this.fight.units.map((u) => ({ ...u })),

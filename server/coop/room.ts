@@ -128,6 +128,21 @@ export class CoopRoom {
     this.enemies = enemies;
   }
 
+  /**
+   * A fresh `CoopRoom` instance always starts `nextFightN` back at 1 (every
+   * cold `getOrLoadRoom` after a restart constructs a new instance) — a
+   * restored fight reusing its old id (e.g. "f1") would otherwise collide
+   * with the very next genuinely new encounter, which would also generate
+   * "f1". Call this once per fight actually re-registered on restore so
+   * new ids never repeat one already in use.
+   */
+  reserveFightId(id: string): void {
+    const m = /^f(\d+)$/.exec(id);
+    if (!m) return;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= this.nextFightN) this.nextFightN = n + 1;
+  }
+
   /** A returning player (same id) re-attaches to their existing spot instead of spawning a new one. */
   addPlayer(id: string, name: string, color: string, now: number): RoomPlayer {
     const existing = this.players.get(id);
