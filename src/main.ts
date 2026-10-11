@@ -725,12 +725,12 @@ function tryTriggerEncounter(now: number) {
   // Slots are assigned once, from the real space left between HUD and hand.
   // If some don't fit, the side list appears and the stage is re-measured.
   ui.overflow.hidden = true;
-  let formation = layoutFormation(units, anchor, viewport());
+  let formation = layoutFormation(units, [anchor], viewport());
   if (DEV) (window as unknown as { __formationVp: unknown }).__formationVp = { vp: viewport(), stage: formation.stage };
   if (formation.overflow.length) {
     ui.overflow.hidden = false;
     placeOverflowPanel();
-    formation = layoutFormation(units, anchor, viewport());
+    formation = layoutFormation(units, [anchor], viewport());
   }
   const overflowIds = new Set(formation.overflow);
   for (const e of roster) {
@@ -772,7 +772,7 @@ function replanCamera(enc: Encounter, useSlots: boolean) {
     return { id: e.enemyId, isBoss: e.tier === "boss", elite: e.tier === "elite", pos: { x: p.x, y: p.y } };
   });
   const slots = new Map(units.map((u) => [u.id, u.pos]));
-  const bounds = formationBounds(units, slots, enc.anchor);
+  const bounds = formationBounds(units, slots, [enc.anchor]);
   const core = units.length ? enemyBounds(units, slots) : bounds;
   const max = enc.difficulty === "dangerous" ? base * (enc.roster.length >= 3 ? CAM_MAX_ZOOM_LARGE : CAM_MAX_ZOOM_SMALL) : base;
   // min below base: only used if the window got too small to show the fight at exploration zoom
@@ -1250,6 +1250,11 @@ function historyHtml(p: SavePayload) {
 
 let lastPayload: SavePayload | null = null;
 
+/** A visible, same-row-as-the-primary-action entry point, never buried after the how-to-play text. */
+function coopEntryHtml(newTab = false): string {
+  return `<a class="coop" href="/coop.html"${newTab ? ' target="_blank" rel="noopener"' : ""}>Play co-op with a friend →</a>`;
+}
+
 function showStartScreen(p: SavePayload) {
   lastPayload = p;
   const s = p.save;
@@ -1257,9 +1262,9 @@ function showStartScreen(p: SavePayload) {
     return showScreen(
       `<h1 id="panelTitle">Camp Clearer</h1>
        <p>A short card-battle trek. Choose which enemies to pull into each fight, read what they're about to do, and play your hand. Your progress is kept on the server for this browser, no account needed.</p>
+       <div class="buttons"><button class="primary" id="go">Start a run</button>${coopEntryHtml()}</div>
        ${HOW_TO}
-       <div class="buttons"><button class="primary" id="go">Start a run</button><a href="/readme/" target="_blank" rel="noopener">What makes this good? (README)</a></div>
-       <p class="note"><a href="/coop.html">Play co-op with a friend (beta) →</a></p>`,
+       <div class="buttons"><a href="/readme/" target="_blank" rel="noopener">What makes this good? (README)</a></div>`,
       { go: () => void beginNewRun() },
     );
   }
@@ -1268,9 +1273,8 @@ function showStartScreen(p: SavePayload) {
       `<h1 id="panelTitle">Welcome back</h1>
        <p>Your saved progress was found on the server:</p>
        ${summaryHtml(s)}
-       <div class="buttons"><button class="primary" id="go">Continue run #${s.runNumber}</button><button id="new">New run…</button></div>
+       <div class="buttons"><button class="primary" id="go">Continue run #${s.runNumber}</button><button id="new">New run…</button>${coopEntryHtml()}</div>
        ${HOW_TO}${historyHtml(p)}
-       <p class="note"><a href="/coop.html">Play co-op with a friend (beta) →</a></p>
        <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
       { go: () => startFromSave(s, true), new: () => confirmNewRun(p), erase: () => confirmErase(p) },
     );
@@ -1279,7 +1283,7 @@ function showStartScreen(p: SavePayload) {
     `<h1 id="panelTitle">${s.outcome === "won" ? "Run complete" : "Your last run ended"}</h1>
      ${summaryHtml(s)}
      <p>That run is kept in your history. Starting a new one doesn't delete anything.</p>
-     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button></div>
+     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button>${coopEntryHtml()}</div>
      ${HOW_TO}${historyHtml(p)}
      <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
     { go: () => void beginNewRun(), erase: () => confirmErase(p) },
@@ -1378,8 +1382,8 @@ function openMenu() {
     `<h1 id="panelTitle">Menu</h1>
      ${run ? summaryHtml(checkpointPreview()) : ""}
      <p class="note">${saveLine} ${activeEncounter ? "This fight isn't saved until it ends; closing now returns you to when it started." : ""}</p>
-     <div class="buttons"><button class="primary" id="resume">Resume</button><button id="new">New run…</button><a href="/readme/" target="_blank" rel="noopener">README</a></div>
-     <p class="note"><a href="/coop.html" target="_blank" rel="noopener">Play co-op with a friend (beta) →</a></p>
+     <div class="buttons"><button class="primary" id="resume">Resume</button><button id="new">New run…</button>${coopEntryHtml(true)}</div>
+     <div class="buttons"><a href="/readme/" target="_blank" rel="noopener">README</a></div>
      ${HOW_TO}
      <p class="note"><button id="erase" class="danger">Erase my saved data…</button></p>`,
     { resume: hideScreen, new: () => confirmNewRun(p), erase: () => confirmErase(p) },
@@ -1395,7 +1399,7 @@ function showEndScreen() {
     `<h1 id="panelTitle">${won ? "All camps cleared!" : "You fell"}</h1>
      ${summaryHtml(checkpointPreview())}
      <p id="endSave" class="note">Saving this result…</p>
-     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button><a href="/readme/" target="_blank" rel="noopener">README</a></div>
+     <div class="buttons"><button class="primary" id="go">Start run #${s.runNumber + 1}</button>${coopEntryHtml()}<a href="/readme/" target="_blank" rel="noopener">README</a></div>
      <p class="note">Key: R starts a new run. Your finished run stays in your history.</p>`,
     { go: () => void beginNewRun() },
   );

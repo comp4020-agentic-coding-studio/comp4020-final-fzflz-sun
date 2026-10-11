@@ -23,6 +23,10 @@
       #hud a, #hud .pill { pointer-events: auto; }
       #roster { display: flex; gap: .5rem; flex-wrap: wrap; font-size: .85rem; }
       #roster span { padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--line); background: #1c1c22; }
+      #roomInfo { display: flex; align-items: center; gap: .5rem; font-size: .85rem; padding: .2rem .6rem; border-radius: 999px; border: 1px solid var(--accent); background: #2a2410; }
+      #roomInfo[hidden] { display: none; }
+      #roomInfo strong { letter-spacing: .05em; }
+      #roomInfo button { padding: .2rem .5rem; font-size: .78rem; }
       #status { color: var(--dim); font-size: .85rem; }
       a { color: var(--accent); text-decoration: none; }
       button { font: inherit; color: var(--text); background: #2b2b33; border: 1px solid var(--line); border-radius: 8px; padding: .5rem .8rem; cursor: pointer; }
@@ -69,6 +73,10 @@
     <div id="game"></div>
     <div id="hud">
       <div id="roster" aria-label="Who's here"></div>
+      <div id="roomInfo" class="pill" hidden>
+        Room <strong id="roomCodeText"></strong>
+        <button id="copyLinkBtn" type="button">Copy invite link</button>
+      </div>
       <div id="status">connecting…</div>
     </div>
     <div id="fightDock" hidden aria-label="Fight">

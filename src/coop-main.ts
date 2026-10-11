@@ -1,5 +1,7 @@
 import kaplay from "kaplay";
 import type { CoopClientMsg, CoopFightMsg, CoopHandMsg, CoopServerMsg } from "./coop-protocol.ts";
+import { PLAYER_JOIN_RADIUS } from "./encounter.ts";
+import { formationBounds, layoutFormation, planCamera, type Unit as FormationUnit, type V, type Viewport } from "./formation.ts";
 import { AREAS, ENEMY_SPAWNS, PLAYER_EDGE, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
 
 // Keep in step with PLAYER_SPEED in server/coop/room.ts: the local-player
@@ -18,8 +20,12 @@ const PLAYER_SPEED = 220;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const ui = {
+  hud: $("hud"),
   roster: $("roster"),
   status: $("status"),
+  roomInfo: $("roomInfo"),
+  roomCodeText: $("roomCodeText"),
+  copyLinkBtn: $<HTMLButtonElement>("copyLinkBtn"),
   screen: $("screen"),
   nameInput: $<HTMLInputElement>("nameInput"),
   codeInput: $<HTMLInputElement>("codeInput"),
@@ -44,15 +50,28 @@ function setStatus(s: string) {
 // ---------- join flow ----------
 
 async function api(path: string, body: unknown): Promise<{ code: string; name: string; color: string }> {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error ?? `request failed (${res.status})`);
-  return data;
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("can't reach the server — check your connection and try again");
+  }
+  let data: { error?: string } = {};
+  try {
+    data = await res.json();
+  } catch {
+    // a non-JSON error body (e.g. a proxy's own error page): fall through to the status-based message below
+  }
+  if (!res.ok) {
+    if (res.status === 404) throw new Error(data.error ?? "no such room — check the code or link");
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+  return data as { code: string; name: string; color: string };
 }
 
 async function startJoinFlow() {
@@ -118,6 +137,22 @@ function baseScale(): number {
   const h = k.height();
   const fit = Math.min(Math.max(Math.min(w / 960, h / 540), 1), 2.2);
   return Math.max(fit, w / WORLD_WIDTH, h / WORLD_HEIGHT);
+}
+
+/** The screen area actually free of the HUD and (when a fight is open) the fight dock, for formation/camera framing. */
+function coopViewport(): Viewport {
+  const w = k.width();
+  const h = k.height();
+  const hudRect = ui.hud.getBoundingClientRect();
+  const dockRect = ui.fightDock.hidden ? null : ui.fightDock.getBoundingClientRect();
+  return {
+    viewW: w,
+    viewH: h,
+    worldW: WORLD_WIDTH,
+    worldH: WORLD_HEIGHT,
+    safe: { x0: 0, y0: hudRect.bottom, x1: w, y1: dockRect ? dockRect.top : h },
+    baseScale: baseScale(),
+  };
 }
 
 // ---------- entities, driven entirely by server snapshots ----------
@@ -190,6 +225,8 @@ interface EnemyView {
   hpLabel: ReturnType<typeof makeLabel>;
   labelOffset: number;
   buf: Snap[];
+  /** eased position while easing into this client's own active fight's formation slot (display-only). */
+  formPos?: { x: number; y: number };
 }
 
 const players = new Map<string, PlayerView>();
@@ -198,6 +235,40 @@ let selfId = "";
 /** The local player's own displayed/predicted position; null until the first snapshot arrives. */
 let selfPos: { x: number; y: number } | null = null;
 let selfFightId: string | null = null;
+
+// ---------- formation: reuses src/formation.ts's solo layout/camera rules,
+// generalized to one anchor per player in the fight (a one-player fight is
+// identical to solo). Enemy slots and camera framing are display-only —
+// identity/HP/intent/targeting all stay on the real server-driven objects;
+// this only moves where they're drawn and where the camera looks while this
+// client's own fight is active. ----------
+interface FightFormation {
+  fightId: string;
+  units: FormationUnit[];
+  slotsByKey: Map<string, V>;
+  slotsById: Map<number, V>;
+  anchors: V[];
+}
+let fightFormation: FightFormation | null = null;
+
+function computeFormation(f: CoopFightMsg) {
+  const anchors: V[] = f.players
+    .map((p) => players.get(p.id)?.body.pos)
+    .filter((p): p is NonNullable<typeof p> => !!p)
+    .map((p) => ({ x: p.x, y: p.y }));
+  if (!anchors.length) anchors.push({ x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 }); // defensive: shouldn't happen
+  const units: FormationUnit[] = f.enemies.map((e, i) => {
+    const pos = enemies.get(e.key)?.body.pos;
+    return { id: i, isBoss: e.tier === "boss", elite: e.tier === "elite", pos: { x: pos?.x ?? 0, y: pos?.y ?? 0 } };
+  });
+  const formation = layoutFormation(units, anchors, coopViewport());
+  const slotsByKey = new Map<string, V>();
+  f.enemies.forEach((e, i) => {
+    const slot = formation.slots.get(i);
+    if (slot) slotsByKey.set(e.key, slot);
+  });
+  fightFormation = { fightId: f.fightId, units, slotsByKey, slotsById: formation.slots, anchors };
+}
 
 function ensurePlayer(id: string, name: string, color: string, x: number, y: number): PlayerView {
   let v = players.get(id);
@@ -252,6 +323,10 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     if (p.id === selfId) {
       const fightChanged = selfFightId !== p.fightId;
       selfFightId = p.fightId;
+      if (fightChanged) {
+        held.clear();
+        touchTarget = null; // entering or leaving a fight always clears any in-flight movement input
+      }
       if (!selfPos || fightChanged || Math.hypot(selfPos.x - p.x, selfPos.y - p.y) > SNAP_DISTANCE) {
         selfPos = { x: p.x, y: p.y };
       } else {
@@ -296,7 +371,13 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
       rosterNodes.set(p.id, span);
     }
     const status = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
-    const text = p.id === selfId ? `${p.name} (you)${status}` : `${p.name}${status}`;
+    let hint = "";
+    if (p.id !== selfId && me && p.online && !p.fightId && !me.fightId) {
+      const dist = Math.hypot(p.x - me.x, p.y - me.y);
+      const arrow = offscreenArrow({ x: p.x, y: p.y });
+      hint = `${arrow ? ` ${arrow}` : ""}${dist <= PLAYER_JOIN_RADIUS ? " · in range" : ""}`;
+    }
+    const text = p.id === selfId ? `${p.name} (you)${status}` : `${p.name}${status}${hint}`;
     setText(span, text);
     const border = p.online ? p.color : "#4a4a52";
     if (span.style.borderColor !== border) span.style.borderColor = border;
@@ -321,10 +402,35 @@ function advanceSelfPrediction(dt: number) {
   selfPos.y += (d.y / len) * PLAYER_SPEED * dt;
   selfPos.x = Math.min(Math.max(selfPos.x, PLAYER_EDGE), WORLD_WIDTH - PLAYER_EDGE);
   selfPos.y = Math.min(Math.max(selfPos.y, PLAYER_EDGE), WORLD_HEIGHT - PLAYER_EDGE);
+  if (touchTarget && Math.hypot(touchTarget.x - selfPos.x, touchTarget.y - selfPos.y) <= ARRIVE_EPS) {
+    touchTarget = null;
+    sendIntent(true); // stop immediately on arrival, don't wait for the next change-triggered send
+  }
+}
+
+/** The exploration camera's current visible world rect, kept for the roster's off-screen direction hint. */
+let camView: { cx: number; cy: number; halfW: number; halfH: number } | null = null;
+const COMPASS = ["→", "↘", "↓", "↙", "←", "↖", "↑", "↗"];
+/** An arrow pointing from the camera center toward `p`, or "" if `p` is already on screen. */
+function offscreenArrow(p: { x: number; y: number }): string {
+  if (!camView) return "";
+  const { cx, cy, halfW, halfH } = camView;
+  if (Math.abs(p.x - cx) <= halfW && Math.abs(p.y - cy) <= halfH) return "";
+  const angle = Math.atan2(p.y - cy, p.x - cx);
+  const octant = Math.round((angle / (Math.PI * 2)) * 8 + 8) % 8;
+  return COMPASS[octant];
 }
 
 function renderFrame() {
   const dt = k.dt();
+  if (!ui.screen.hidden) {
+    // the pre-join screen is open: a drag across the (invisible, canvas-sized)
+    // game area must never queue up a move for when the fight/join flow closes
+    touchTarget = null;
+  } else if (k.isMouseDown("left") && selfId && !selfFightId) {
+    touchTarget = k.toWorld(k.mousePos()); // holding/dragging keeps resampling, same as src/main.ts
+    sendIntent();
+  }
   advanceSelfPrediction(dt);
   const renderAt = performance.now() - INTERP_DELAY_MS;
 
@@ -334,7 +440,22 @@ function renderFrame() {
     v.body.pos = k.vec2(p.x, p.y);
     v.label.pos = k.vec2(p.x, p.y - 28);
   }
-  for (const [, v] of enemies) {
+  const inOwnFormation = !!selfFightId && fightFormation?.fightId === selfFightId;
+  for (const [id, v] of enemies) {
+    const slot = inOwnFormation ? fightFormation!.slotsByKey.get(id) : undefined;
+    if (slot) {
+      // ease toward the fixed slot (display-only) instead of snapping, a simple
+      // version of src/main.ts's forming transition; identity/HP/intent never
+      // move, only where this is drawn.
+      if (!v.formPos) v.formPos = { x: v.body.pos.x, y: v.body.pos.y };
+      const ease = Math.min(1, dt * 6);
+      v.formPos.x += (slot.x - v.formPos.x) * ease;
+      v.formPos.y += (slot.y - v.formPos.y) * ease;
+      v.body.pos = k.vec2(v.formPos.x, v.formPos.y);
+      v.hpLabel.pos = k.vec2(v.formPos.x, v.formPos.y - v.labelOffset);
+      continue;
+    }
+    v.formPos = undefined;
     const p = sampleBuffer(v.buf, renderAt);
     if (!p) continue;
     v.body.pos = k.vec2(p.x, p.y);
@@ -342,13 +463,22 @@ function renderFrame() {
   }
 
   const me = selfPos;
-  if (me) {
+  if (inOwnFormation) {
+    const vp = coopViewport();
+    const bounds = formationBounds(fightFormation!.units, fightFormation!.slotsById, fightFormation!.anchors);
+    const base = baseScale();
+    const cam = planCamera(bounds, vp, { min: base, max: base });
+    k.setCamScale(cam.scale);
+    k.setCamPos(k.vec2(cam.center.x, cam.center.y));
+    camView = { cx: cam.center.x, cy: cam.center.y, halfW: vp.viewW / 2 / cam.scale, halfH: vp.viewH / 2 / cam.scale };
+  } else if (me) {
     const scale = baseScale();
     k.setCamScale(scale);
     const half = { x: k.width() / 2 / scale, y: k.height() / 2 / scale };
     const cx = Math.min(Math.max(me.x, half.x), WORLD_WIDTH - half.x);
     const cy = Math.min(Math.max(me.y, half.y), WORLD_HEIGHT - half.y);
     k.setCamPos(k.vec2(cx, cy));
+    camView = { cx, cy, halfW: half.x, halfH: half.y };
   }
 }
 k.onUpdate(renderFrame);
@@ -360,11 +490,14 @@ const KEYS: Record<string, [number, number]> = {
   arrowup: [0, -1], arrowdown: [0, 1], arrowleft: [-1, 0], arrowright: [1, 0],
   w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0],
 };
+/** Desktop click-and-hold or a phone tap/drag: walk toward this point, same idea as src/main.ts's moveTarget. */
+let touchTarget: { x: number; y: number } | null = null;
+const ARRIVE_EPS = 6;
 
 let socket: WebSocket | null = null;
 let lastSentDir = { x: 2, y: 2 }; // force the first send
 
-function currentDir(): { x: number; y: number } {
+function heldDir(): { x: number; y: number } {
   let x = 0;
   let y = 0;
   for (const key of held) {
@@ -377,9 +510,29 @@ function currentDir(): { x: number; y: number } {
   return { x, y };
 }
 
+function currentDir(): { x: number; y: number } {
+  const h = heldDir();
+  if (h.x !== 0 || h.y !== 0) return h;
+  if (touchTarget && selfPos) {
+    const dx = touchTarget.x - selfPos.x;
+    const dy = touchTarget.y - selfPos.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > ARRIVE_EPS) return { x: dx / dist, y: dy / dist };
+  }
+  return { x: 0, y: 0 };
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function sendIntent(force = false) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const d = currentDir();
+  const raw = currentDir();
+  // tap-to-move's direction is a continuous vector toward a fixed point, so it
+  // changes by a tiny amount every single frame while walking in a straight
+  // line — round before comparing, or this would resend on nearly every frame
+  // instead of only on an actually meaningful change (keyboard's -1/0/1 values
+  // are unaffected by the rounding).
+  const d = { x: round2(raw.x), y: round2(raw.y) };
   if (!force && d.x === lastSentDir.x && d.y === lastSentDir.y) return;
   lastSentDir = d;
   const msg: CoopClientMsg = { type: "move", dx: d.x, dy: d.y };
@@ -387,9 +540,13 @@ function sendIntent(force = false) {
 }
 
 window.addEventListener("keydown", (e) => {
+  // typing a name or room code that happens to contain w/a/s/d, or using arrow
+  // keys to move the text cursor in #codeInput, must never also move the player.
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
   const key = e.key.toLowerCase();
   if (key in KEYS) {
     held.add(key);
+    touchTarget = null; // a keyboard press always overrides an in-flight tap-to-move
     sendIntent();
   }
 });
@@ -399,6 +556,7 @@ window.addEventListener("keyup", (e) => {
 });
 window.addEventListener("blur", () => {
   held.clear();
+  touchTarget = null;
   sendIntent(true);
 });
 // a safety-net resend: WebSocket doesn't drop messages in order on its own, but
@@ -568,20 +726,51 @@ function setText(el: HTMLElement, text: string) {
 ui.endTurnBtn.onclick = () => sendAction({ type: "endTurn", seq: nextSeq() });
 ui.fleeBtn.onclick = () => sendAction({ type: "flee", seq: nextSeq() });
 
-// ---------- connect ----------
+// ---------- connect, with bounded auto-reconnect ----------
 
-async function main() {
-  const joined = await startJoinFlow();
-  history.replaceState(null, "", `${location.pathname}?code=${joined.code}`);
-  ui.screen.hidden = true;
-  setStatus("connecting…");
+let roomCode = "";
+let reconnectAttempt = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+const MAX_RECONNECT_DELAY_MS = 15000;
 
-  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/coop/ws?code=${joined.code}`;
-  socket = new WebSocket(wsUrl);
-  socket.addEventListener("open", () => setStatus(`room ${joined.code}`));
-  socket.addEventListener("close", () => setStatus("disconnected — reload to try again"));
-  socket.addEventListener("error", () => setStatus("connection error"));
-  socket.addEventListener("message", (ev) => {
+function roomStatusPrefix(): string {
+  return `room ${roomCode}`;
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return; // already counting down
+  reconnectAttempt++;
+  const delaySec = Math.round(Math.min(1000 * 2 ** (reconnectAttempt - 1), MAX_RECONNECT_DELAY_MS) / 1000);
+  setStatus(`disconnected — reconnecting in ${delaySec}s (attempt ${reconnectAttempt})…`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectSocket();
+  }, delaySec * 1000);
+}
+
+function connectSocket() {
+  held.clear();
+  touchTarget = null;
+  setStatus(reconnectAttempt > 0 ? `${roomStatusPrefix()} — reconnecting…` : "connecting…");
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/coop/ws?code=${roomCode}`;
+  const ws = new WebSocket(wsUrl);
+  socket = ws;
+  ws.addEventListener("open", () => {
+    reconnectAttempt = 0;
+    setStatus(roomStatusPrefix());
+  });
+  ws.addEventListener("close", (ev) => {
+    held.clear();
+    touchTarget = null;
+    if (ev.code === 4000) {
+      // a bounded retry here would just fight the other tab for the connection forever.
+      setStatus("opened in another tab — this tab is no longer connected");
+      return;
+    }
+    scheduleReconnect();
+  });
+  ws.addEventListener("error", () => setStatus("connection error"));
+  ws.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data) as CoopServerMsg;
     if (msg.type === "hello") {
       selfId = msg.selfId;
@@ -591,6 +780,7 @@ async function main() {
       for (const p of msg.players) memberNames.set(p.id, p.name);
     } else if (msg.type === "fight") {
       currentFight = msg;
+      if (!fightFormation || fightFormation.fightId !== msg.fightId) computeFormation(msg);
       scheduleRenderFight();
     } else if (msg.type === "hand") {
       currentHand = msg;
@@ -603,6 +793,7 @@ async function main() {
       currentFight = null;
       currentHand = null;
       selectedTargetKey = null;
+      fightFormation = null;
       renderFight();
       showFightEndFeedback(msg.outcome);
     } else if (msg.type === "leftFight") {
@@ -611,12 +802,35 @@ async function main() {
       currentFight = null;
       currentHand = null;
       selectedTargetKey = null;
+      fightFormation = null;
       renderFight();
-      setStatus(`room ${new URLSearchParams(location.search).get("code") ?? ""} — you fled; your party keeps fighting`);
+      setStatus(`${roomStatusPrefix()} — you fled; your party keeps fighting`);
     } else if (msg.type === "actionError") {
       setText(ui.fightError, msg.error);
     }
   });
+}
+
+async function main() {
+  const joined = await startJoinFlow();
+  roomCode = joined.code;
+  history.replaceState(null, "", `${location.pathname}?code=${roomCode}`);
+  ui.screen.hidden = true;
+  ui.roomCodeText.textContent = roomCode;
+  ui.roomInfo.hidden = false;
+  ui.copyLinkBtn.onclick = async () => {
+    const link = `${location.origin}/coop.html?code=${roomCode}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      const original = ui.copyLinkBtn.textContent;
+      ui.copyLinkBtn.textContent = "Copied!";
+      setTimeout(() => (ui.copyLinkBtn.textContent = original), 1500);
+    } catch {
+      // clipboard permission denied or unavailable: show the link so it can be copied by hand
+      ui.copyLinkBtn.textContent = link;
+    }
+  };
+  connectSocket();
 
   // debug/test hook, mirroring src/main.ts's window.__game
   (window as unknown as { __coop: () => unknown }).__coop = () => ({
@@ -634,7 +848,7 @@ async function main() {
 
 function showFightEndFeedback(outcome: "won" | "wiped" | "abandoned") {
   const msg = outcome === "won" ? "Victory!" : outcome === "wiped" ? "You fell." : "Retreated.";
-  setStatus(`room ${new URLSearchParams(location.search).get("code") ?? ""} — ${msg}`);
+  setStatus(`${roomStatusPrefix()} — ${msg}`);
 }
 
 main();

@@ -102,15 +102,28 @@ export function stageRect(anchor: V, dir: V, v: Viewport): Rect {
   return { x0, y0, x1: x0 + w, y1: y0 + h };
 }
 
+function centroidOf(points: V[]): V {
+  if (points.length === 1) return points[0];
+  return {
+    x: points.reduce((s, p) => s + p.x, 0) / points.length,
+    y: points.reduce((s, p) => s + p.y, 0) / points.length,
+  };
+}
+
 /**
- * Assigns each unit a combat slot around the player, once, at engagement.
- * Candidate points sit on rings around the player, scored so nearer rings and
- * the side the enemies came from fill first (an arc, then further rows). A
- * point is taken only if its full footprint stays inside the stage and clear
- * of every other footprint. Bosses are placed first; whatever doesn't fit
- * goes to the overflow list instead of being squeezed in or dropped.
+ * Assigns each unit a combat slot around the player(s), once, at engagement.
+ * One or more anchors (solo: a single player; co-op: every player in the
+ * fight) each get their own fixed PLAYER_BOX kept clear of every slot; rings
+ * and the stage itself are centred on their centroid (identical to a single
+ * anchor when there's only one). Candidate points sit on rings around that
+ * centre, scored so nearer rings and the side the enemies came from fill
+ * first (an arc, then further rows). A point is taken only if its full
+ * footprint stays inside the stage and clear of every other footprint.
+ * Bosses are placed first; whatever doesn't fit goes to the overflow list
+ * instead of being squeezed in or dropped.
  */
-export function layoutFormation(units: Unit[], anchor: V, v: Viewport, maxVisible = Infinity): Formation {
+export function layoutFormation(units: Unit[], anchors: V[], v: Viewport, maxVisible = Infinity): Formation {
+  const anchor = centroidOf(anchors);
   let sx = 0;
   let sy = 0;
   for (const u of units) {
@@ -137,7 +150,7 @@ export function layoutFormation(units: Unit[], anchor: V, v: Viewport, maxVisibl
   }
   candidates.sort((a, b) => a.score - b.score);
 
-  const placedRects: Rect[] = [boxAt(anchor, PLAYER_BOX)];
+  const placedRects: Rect[] = anchors.map((a) => boxAt(a, PLAYER_BOX));
   const take = (box: Box): V | null => {
     for (const c of candidates) {
       const r = boxAt(c.p, box);
@@ -194,9 +207,9 @@ function dist(a: V, b: V) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-/** Union of the player's and every slotted unit's footprint. */
-export function formationBounds(units: Unit[], slots: Map<number, V>, anchor: V): Rect {
-  const rects = [boxAt(anchor, PLAYER_BOX)];
+/** Union of every player's and every slotted unit's footprint. */
+export function formationBounds(units: Unit[], slots: Map<number, V>, anchors: V[]): Rect {
+  const rects = anchors.map((a) => boxAt(a, PLAYER_BOX));
   for (const u of units) {
     const p = slots.get(u.id);
     if (p) rects.push(boxAt(p, boxFor(u)));

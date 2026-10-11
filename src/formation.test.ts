@@ -68,7 +68,7 @@ describe.each(Object.entries(VIEWPORTS))("encounter formation at %s", (_vpName, 
     for (const [label, n, boss] of CASES) {
       it(`${label} at ${anchorName}: every enemy slotted, nothing overlaps, all readable on screen`, () => {
         const units = crowd(anchor, n, boss);
-        const f = layoutFormation(units, anchor, VP);
+        const f = layoutFormation(units, [anchor], VP);
 
         expect(f.overflow).toEqual([]);
         expect(f.slots.size).toBe(units.length);
@@ -83,7 +83,7 @@ describe.each(Object.entries(VIEWPORTS))("encounter formation at %s", (_vpName, 
 
         // Both camera modes keep every enemy footprint (body, HP, intent,
         // marker) inside the safe rect, and the camera itself stays on-map.
-        const bounds = formationBounds(units, f.slots, anchor);
+        const bounds = formationBounds(units, f.slots, [anchor]);
         for (const zoom of [{ min: VP.baseScale!, max: VP.baseScale! }, { min: VP.baseScale!, max: VP.baseScale! * 1.5 }]) {
           const cam = planCamera(bounds, VP, zoom);
           const clamped = clampCam(cam.center, cam.scale, VP);
@@ -106,7 +106,7 @@ describe("encounter formation", () => {
   it("enemies stacked on one exact point still get distinct slots", () => {
     const anchor = ANCHORS.centre;
     const units: Unit[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, isBoss: i === 0, pos: { x: 1140, y: 650 } }));
-    const f = layoutFormation(units, anchor, VIEWPORT);
+    const f = layoutFormation(units, [anchor], VIEWPORT);
     const keys = new Set([...f.slots.values()].map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`));
     expect(keys.size).toBe(units.length);
   });
@@ -114,7 +114,7 @@ describe("encounter formation", () => {
   it("too many to place cleanly: the rest go to the overflow list, none dropped", () => {
     const anchor = ANCHORS.centre;
     const units = crowd(anchor, 40, true);
-    const f = layoutFormation(units, anchor, VIEWPORT);
+    const f = layoutFormation(units, [anchor], VIEWPORT);
     expect(f.overflow.length).toBeGreaterThan(0);
     const ids = [...f.slots.keys(), ...f.overflow];
     expect(new Set(ids).size).toBe(units.length);
@@ -129,7 +129,7 @@ describe("encounter formation", () => {
       { id: 2, isBoss: false, pos: { x: 1220, y: 650 } }, // right
       { id: 3, isBoss: false, pos: { x: 1200, y: 740 } }, // lower right
     ];
-    const f = layoutFormation(units, anchor, VIEWPORT);
+    const f = layoutFormation(units, [anchor], VIEWPORT);
     const order = units.slice().sort((a, b) => rel(f.slots.get(a.id)!) - rel(f.slots.get(b.id)!)).map((u) => u.id);
     expect(order).toEqual([1, 2, 3]);
   });
@@ -137,8 +137,42 @@ describe("encounter formation", () => {
   it("is deterministic for the same input", () => {
     const anchor = ANCHORS.bottomRight;
     const units = crowd(anchor, 5, true);
-    const a = layoutFormation(units, anchor, VIEWPORT);
-    const b = layoutFormation(units, anchor, VIEWPORT);
+    const a = layoutFormation(units, [anchor], VIEWPORT);
+    const b = layoutFormation(units, [anchor], VIEWPORT);
     expect([...a.slots.entries()]).toEqual([...b.slots.entries()]);
+  });
+});
+
+describe("co-op: more than one anchor", () => {
+  it("a single-element anchor list behaves exactly like the old single-anchor API", () => {
+    const anchor = ANCHORS.centre;
+    const units = crowd(anchor, 4, true);
+    const solo = layoutFormation(units, [anchor], VIEWPORT);
+    // the centroid of one point is that point, so nothing about ring placement changes
+    expect(solo.overflow).toEqual([]);
+    expect(solo.slots.size).toBe(units.length);
+  });
+
+  it("no enemy slot overlaps either player's own footprint", () => {
+    const p1 = { x: 1100, y: 650 };
+    const p2 = { x: 1160, y: 650 }; // close together, like two co-op players sharing a fight
+    const units = crowd(p1, 5, true);
+    const f = layoutFormation(units, [p1, p2], VIEWPORT);
+    expect(f.overflow).toEqual([]);
+    const playerBoxes = [boxAt(p1, PLAYER_BOX), boxAt(p2, PLAYER_BOX)];
+    for (const u of units) {
+      const r = footprint(u, f.slots.get(u.id)!);
+      for (const pb of playerBoxes) expect(rectsOverlap(r, pb)).toBe(false);
+    }
+  });
+
+  it("formationBounds includes every anchor's own footprint, not just one", () => {
+    const p1 = { x: 1100, y: 650 };
+    const p2 = { x: 1500, y: 650 };
+    const units = crowd(p1, 2, false);
+    const f = layoutFormation(units, [p1, p2], VIEWPORT);
+    const bounds = formationBounds(units, f.slots, [p1, p2]);
+    const p2Box = boxAt(p2, PLAYER_BOX);
+    expect(inside(p2Box, bounds)).toBe(true);
   });
 });
