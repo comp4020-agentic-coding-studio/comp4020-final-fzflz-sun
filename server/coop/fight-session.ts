@@ -67,9 +67,18 @@ interface PlayerFightState {
  */
 export interface PersistedFightPlayer {
   id: string;
+  /**
+   * Captured here too, not left to the room-level snapshot alone: that
+   * snapshot is only written on its own debounce (server/coop/ws.ts), so a
+   * crash between a damaging action and the next debounced write would
+   * otherwise roll a player's HP back to a stale, higher value on restore.
+   */
+  hp: number;
   block: number;
   downed: boolean;
   fled: boolean;
+  /** whether this player had already ended their turn or committed to flee this round — must survive a restart exactly, or a player who'd already committed could regain the ability to act. */
+  ready: boolean;
   piles: Piles;
   handIds: string[];
   energy: number;
@@ -157,8 +166,16 @@ export class FightSession {
       for (const saved of restore.players) {
         const rp = room.players.get(saved.id);
         if (!rp) continue; // a member who's since left the room entirely: nothing to resume them into
+        // the fight's own record of hp/block is the freshest one (captured at the same
+        // moment as everything else here), not the room-level snapshot's separately
+        // debounced copy — restoring from that instead would risk rolling HP back to a
+        // stale, higher value if the crash landed between the two writes.
+        rp.hp = saved.hp;
         rp.block = saved.block;
-        rp.ready = false; // nobody has re-readied since the restart; a restored fight always resumes mid-round
+        // exactly as it was at the moment of the last completed action: a player who'd
+        // already ended their turn or committed to flee this round must stay unable to
+        // act after a restart, not regain it by being reset to "not ready".
+        rp.ready = saved.ready;
         // a fled player has already left (no seat to resume); a downed one stays a member
         // (structurally present, shown as fallen) exactly like live play, just like the rest.
         if (!saved.fled) {
@@ -190,8 +207,9 @@ export class FightSession {
     const roomFight = this.room.fights.get(this.id)!;
     const players: PersistedFightPlayer[] = this.fight.players.map((p) => {
       const ps = this.playerStates.get(p.id);
+      const rp = this.room.players.get(p.id);
       return {
-        id: p.id, block: p.block, downed: p.downed, fled: p.fled,
+        id: p.id, hp: p.hp, block: p.block, downed: p.downed, fled: p.fled, ready: rp?.ready ?? false,
         piles: ps?.piles ?? EMPTY_PILES, handIds: ps?.handIds ?? [], energy: ps?.energy ?? 0, lastSeq: ps?.lastSeq ?? 0,
       };
     });

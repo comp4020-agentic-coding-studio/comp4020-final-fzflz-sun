@@ -269,3 +269,62 @@ describe("FightSession: a reconnect window timing out (forceFlee)", () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe("FightSession: serialize/restore (a server restart mid-fight)", () => {
+  it("round-trips turn, enemy state, hands, energy, lastSeq and card instance ids exactly", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"], { "west-1": 999 });
+    const strike = findCard(session, "p1", "Strike");
+    session.applyAction("p1", 1, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" }, 0, rng(2));
+    const data = session.serialize();
+
+    const restored = new FightSession(room, roomFight, rng(9), data);
+    expect(restored.fight.turn).toBe(session.fight.turn);
+    expect(restored.fight.units.map((u) => u.hp)).toEqual(session.fight.units.map((u) => u.hp));
+    expect(hand(restored, "p1").map((c) => c.id)).toEqual(hand(session, "p1").map((c) => c.id));
+    expect(restored.handView("p1")!.energy).toBe(session.handView("p1")!.energy);
+    expect(restored.handView("p1")!.lastSeq).toBe(session.handView("p1")!.lastSeq);
+    expect(restored.handView("p2")!.cards.length).toBe(4); // p2 never acted: still their original fresh hand
+  });
+
+  it("restores a player's HP from the fight's own record, not a stale value already sitting on the room", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"]);
+    session.fight.players.find((p) => p.id === "p1")!.hp = 11; // simulate damage taken this fight
+    const data = session.serialize();
+    // simulate a crash landing before the room-level debounced snapshot caught up:
+    // the room still thinks p1 is at full HP.
+    room.players.get("p1")!.hp = 24;
+
+    new FightSession(room, roomFight, rng(9), data);
+    expect(room.players.get("p1")!.hp).toBe(11); // not rolled back to the stale 24
+  });
+
+  it("restores exactly who had already readied up (ended turn or committed to flee), not resetting everyone to not-ready", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"], { "west-1": 999 });
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2)); // p1 ready; p2 hasn't acted, round doesn't resolve
+    expect(session.ended).toBeNull();
+    const data = session.serialize();
+
+    const restored = new FightSession(room, roomFight, rng(9), data);
+    expect(room.players.get("p1")!.ready).toBe(true);
+    expect(room.players.get("p2")!.ready).toBe(false);
+    // p1 already committed this round: must still be rejected, not able to sneak in another card
+    const card = hand(restored, "p1")[0];
+    const r = restored.applyAction("p1", 2, { type: "playCard", cardInstanceId: card.id }, 0, rng(2));
+    expect(r.ok).toBe(false);
+    // p2 can still act normally
+    const r2 = restored.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+    expect(r2.ok).toBe(true);
+  });
+
+  it("a fled player is not resumed as a member, and isn't given a seat in the restored fight", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"]);
+    session.applyAction("p1", 1, { type: "flee" }, 0, rng(2)); // p1 ready+pendingFlee, p2 hasn't acted yet
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2)); // round resolves: p1 actually leaves
+    expect(session.isMember("p1")).toBe(false);
+    const data = session.serialize();
+
+    const restored = new FightSession(room, roomFight, rng(9), data);
+    expect(restored.isMember("p1")).toBe(false);
+    expect(restored.isMember("p2")).toBe(true);
+  });
+});
