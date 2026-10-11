@@ -57,6 +57,34 @@ interface PlayerFightState {
   lastSeq: number;
 }
 
+/**
+ * A fight's full, resolved state: enough to resume it exactly where it was
+ * (same hands, round, energy, card instance ids, downed/fled flags) without
+ * re-dealing, re-resolving, or re-confirming anything. Written after every
+ * completed action (server/coop/ws.ts); read back only at room load, when
+ * server/coop/store.ts's `fights` table still has a row for a fight whose
+ * room never saw it end.
+ */
+export interface PersistedFightPlayer {
+  id: string;
+  block: number;
+  downed: boolean;
+  fled: boolean;
+  piles: Piles;
+  handIds: string[];
+  energy: number;
+  lastSeq: number;
+}
+export interface PersistedFight {
+  roomFight: RoomFight;
+  turn: number;
+  units: CombatUnit[];
+  players: PersistedFightPlayer[];
+  pendingFlee: string[];
+}
+
+const EMPTY_PILES: Piles = { draw: [], hand: [], discard: [], exhaust: [] };
+
 let cardIdN = 1;
 const newCardId = () => `card${cardIdN++}`;
 
@@ -98,19 +126,53 @@ export class FightSession {
   private enemyByKey = new Map<string, RoomEnemy>();
   private playerStates = new Map<string, PlayerFightState>();
   private pendingFlee = new Set<string>();
+  /** Players who personally left this round while the fight continues for others: ws.ts owes each of these one
+   * explicit message (there's no `fightEnded` for them, since the fight itself didn't end) so their own client
+   * actually closes its fight dock instead of it sitting on the last view it had. Cleared by takeJustLeft(). */
+  private justLeft: string[] = [];
   ended: FightOutcome | null = null;
 
-  constructor(room: CoopRoom, roomFight: RoomFight, rng: () => number) {
+  /**
+   * `restore`, when given, reconstructs exactly the persisted state (a server
+   * restart recovering a fight in progress) instead of dealing a fresh
+   * round — no re-shuffling, no re-dealing, no re-resolving anything that
+   * already happened.
+   */
+  constructor(room: CoopRoom, roomFight: RoomFight, rng: () => number, restore?: PersistedFight) {
     this.room = room;
     this.id = roomFight.id;
     this.initialPlayerIds = [...roomFight.playerIds];
+    for (const key of roomFight.enemyKeys) this.enemyByKey.set(key, room.enemies.find((x) => x.key === key)!);
 
-    const units: CombatUnit[] = [];
-    for (const key of roomFight.enemyKeys) {
-      const e = room.enemies.find((x) => x.key === key)!;
-      this.enemyByKey.set(key, e);
-      units.push(makeUnit(e.key, e.role, e.group, e.hp, e.phase));
+    if (restore) {
+      const units: CombatUnit[] = restore.units.map((u) => ({ ...u }));
+      const players: FightPlayer[] = roomFight.playerIds.map((pid) => {
+        const adapter = fightPlayerAdapter(room.players.get(pid)!);
+        const saved = restore.players.find((p) => p.id === pid);
+        adapter.downed = saved?.downed ?? false;
+        adapter.fled = saved?.fled ?? false;
+        return adapter;
+      });
+      this.fight = { turn: restore.turn, units, players };
+      for (const saved of restore.players) {
+        const rp = room.players.get(saved.id);
+        if (!rp) continue; // a member who's since left the room entirely: nothing to resume them into
+        rp.block = saved.block;
+        rp.ready = false; // nobody has re-readied since the restart; a restored fight always resumes mid-round
+        // a fled player has already left (no seat to resume); a downed one stays a member
+        // (structurally present, shown as fallen) exactly like live play, just like the rest.
+        if (!saved.fled) {
+          this.playerStates.set(saved.id, { id: saved.id, piles: saved.piles, handIds: saved.handIds, energy: saved.energy, lastSeq: saved.lastSeq });
+        }
+      }
+      for (const pid of restore.pendingFlee) this.pendingFlee.add(pid);
+      return;
     }
+
+    const units: CombatUnit[] = roomFight.enemyKeys.map((key) => {
+      const e = this.enemyByKey.get(key)!;
+      return makeUnit(e.key, e.role, e.group, e.hp, e.phase);
+    });
     const players: FightPlayer[] = roomFight.playerIds.map((pid) => fightPlayerAdapter(room.players.get(pid)!));
     this.fight = beginFight(units, players);
 
@@ -121,6 +183,25 @@ export class FightSession {
       rp.ready = false;
     }
     this.startRound(rng);
+  }
+
+  /** Everything needed to resume this fight exactly where it is, with no re-dealing or re-resolving. */
+  serialize(): PersistedFight {
+    const roomFight = this.room.fights.get(this.id)!;
+    const players: PersistedFightPlayer[] = this.fight.players.map((p) => {
+      const ps = this.playerStates.get(p.id);
+      return {
+        id: p.id, block: p.block, downed: p.downed, fled: p.fled,
+        piles: ps?.piles ?? EMPTY_PILES, handIds: ps?.handIds ?? [], energy: ps?.energy ?? 0, lastSeq: ps?.lastSeq ?? 0,
+      };
+    });
+    return {
+      roomFight,
+      turn: this.fight.turn,
+      units: this.fight.units.map((u) => ({ ...u })),
+      players,
+      pendingFlee: [...this.pendingFlee],
+    };
   }
 
   /** Every player id this fight still has a seat for (present, however they're doing). */
@@ -249,6 +330,7 @@ export class FightSession {
     for (const pid of this.pendingFlee) markFled(this.fight, pid);
     this.pendingFlee.clear();
 
+    this.justLeft = [];
     for (const pid of this.playerIds) {
       const p = playerById(this.fight, pid)!;
       if (p.fled) {
@@ -257,12 +339,20 @@ export class FightSession {
         rp.ready = false;
         rp.block = 0;
         this.playerStates.delete(pid);
+        this.justLeft.push(pid);
       }
     }
 
     if (isWon(this.fight)) return this.finish(now, "won");
     if (isPartyWiped(this.fight)) return this.finish(now, this.fight.players.some((pl) => pl.fled) ? "abandoned" : "wiped");
     this.startRound(rng);
+  }
+
+  /** The players who personally left this round (fled, fight continues for others), once, for ws.ts to notify. */
+  takeJustLeft(): string[] {
+    const out = this.justLeft;
+    this.justLeft = [];
+    return out;
   }
 
   private finish(now: number, outcome: FightOutcome) {
@@ -311,6 +401,6 @@ export class FightSession {
   handView(playerId: string): CoopHandMsg | null {
     const ps = this.playerStates.get(playerId);
     if (!ps) return null;
-    return { type: "hand", fightId: this.id, cards: ps.piles.hand.map((c, i) => cardView(ps.handIds[i], c)), energy: ps.energy };
+    return { type: "hand", fightId: this.id, cards: ps.piles.hand.map((c, i) => cardView(ps.handIds[i], c)), energy: ps.energy, lastSeq: ps.lastSeq };
   }
 }

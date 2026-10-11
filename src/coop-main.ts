@@ -594,6 +594,10 @@ async function main() {
       scheduleRenderFight();
     } else if (msg.type === "hand") {
       currentHand = msg;
+      // a refreshed page always starts actionSeq back at 0; adopt the server's
+      // real count (never backwards) so the next action isn't mistaken for a
+      // stale replay of one that was actually never sent this session.
+      actionSeq = Math.max(actionSeq, msg.lastSeq);
       scheduleRenderFight();
     } else if (msg.type === "fightEnded") {
       currentFight = null;
@@ -601,6 +605,14 @@ async function main() {
       selectedTargetKey = null;
       renderFight();
       showFightEndFeedback(msg.outcome);
+    } else if (msg.type === "leftFight") {
+      // the fight itself continues for the rest of the party: only this
+      // client's own dock closes, distinct from a whole-fight fightEnded.
+      currentFight = null;
+      currentHand = null;
+      selectedTargetKey = null;
+      renderFight();
+      setStatus(`room ${new URLSearchParams(location.search).get("code") ?? ""} — you fled; your party keeps fighting`);
     } else if (msg.type === "actionError") {
       setText(ui.fightError, msg.error);
     }

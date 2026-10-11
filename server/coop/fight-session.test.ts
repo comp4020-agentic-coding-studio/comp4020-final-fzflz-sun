@@ -45,6 +45,18 @@ describe("FightSession: setup", () => {
     expect(h.cards).toHaveLength(4);
     expect(h.energy).toBe(PLAYER_MAX_ENERGY);
     expect(new Set(h.cards.map((c) => c.id)).size).toBe(4); // distinct instance ids, even if some share a name
+    expect(h.lastSeq).toBe(0);
+  });
+
+  it("handView's lastSeq tracks accepted actions, so a refreshed client can resume its counter from it", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const strike = findCard(session, "p1", "Strike");
+    session.applyAction("p1", 1, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" }, 0, rng(2));
+    expect(session.handView("p1")!.lastSeq).toBe(1);
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2)); // a stale/duplicate seq: rejected, doesn't advance
+    expect(session.handView("p1")!.lastSeq).toBe(1);
+    session.applyAction("p1", 2, { type: "endTurn" }, 0, rng(2));
+    expect(session.handView("p1")!.lastSeq).toBe(2);
   });
 
   it("the fight view shows enemy intent and HP, and every player's block/ready/downed state", () => {
@@ -172,6 +184,24 @@ describe("FightSession: fleeing and death", () => {
     expect(room.players.get("p2")!.fightId).toBe("f1");
     expect(session.isMember("p1")).toBe(false);
     expect(session.isMember("p2")).toBe(true);
+  });
+
+  it("takeJustLeft() reports exactly the player who personally left this round, once (ws.ts's leftFight message)", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    session.applyAction("p1", 1, { type: "flee" }, 0, rng(2));
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+    expect(session.takeJustLeft()).toEqual(["p1"]);
+    expect(session.takeJustLeft()).toEqual([]); // consumed: not reported twice
+  });
+
+  it("a downed player is not reported by takeJustLeft(): they stay structurally present, shown as fallen", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    session.fight.players[0].hp = 2; // west-1's shown attack (3 dmg) will down p1, not kill the whole party
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+    expect(session.fight.players[0].downed).toBe(true);
+    expect(session.takeJustLeft()).toEqual([]);
+    expect(session.isMember("p1")).toBe(true); // still a member: fightView/handView keep covering them
   });
 
   it("the whole party downed ends the fight as a wipe; the surviving enemy returns to roaming with its current HP", () => {

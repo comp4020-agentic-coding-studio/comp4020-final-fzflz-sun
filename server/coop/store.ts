@@ -14,6 +14,11 @@ export interface CoopMember {
   joinedAt: number;
 }
 
+export interface PersistedFightRow {
+  fightId: string;
+  data: string;
+}
+
 export interface CoopStore {
   createRoom(code: string, now: number): void;
   roomExists(code: string): boolean;
@@ -21,6 +26,10 @@ export interface CoopStore {
   members(code: string): CoopMember[];
   getState(code: string): string | null;
   putState(code: string, json: string, now: number): void;
+  /** One active fight's full, resolved state (hands, round, energy, card instance ids): see server/coop/fight-session.ts's serialize()/restore. */
+  putFight(code: string, fightId: string, json: string, now: number): void;
+  deleteFight(code: string, fightId: string): void;
+  fights(code: string): PersistedFightRow[];
   close(): void;
 }
 
@@ -48,6 +57,13 @@ export function openCoopStore(dataDir: string): CoopStore {
       data TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS fights (
+      room_code TEXT NOT NULL REFERENCES rooms(code) ON DELETE CASCADE,
+      fight_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (room_code, fight_id)
+    );
   `);
 
   const insRoom = db.prepare("INSERT OR IGNORE INTO rooms (code, created_at) VALUES (?, ?)");
@@ -62,6 +78,12 @@ export function openCoopStore(dataDir: string): CoopStore {
     "INSERT INTO room_state (room_code, data, updated_at) VALUES (?, ?, ?) " +
       "ON CONFLICT(room_code) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
   );
+  const putFight = db.prepare(
+    "INSERT INTO fights (room_code, fight_id, data, updated_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(room_code, fight_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+  );
+  const delFight = db.prepare("DELETE FROM fights WHERE room_code = ? AND fight_id = ?");
+  const selFights = db.prepare("SELECT fight_id, data FROM fights WHERE room_code = ?");
 
   return {
     createRoom: (code, now) => insRoom.run(code, now),
@@ -76,6 +98,9 @@ export function openCoopStore(dataDir: string): CoopStore {
       })),
     getState: (code) => (selState.get(code) as { data: string } | undefined)?.data ?? null,
     putState: (code, json, now) => void putState.run(code, json, now),
+    putFight: (code, fightId, json, now) => void putFight.run(code, fightId, json, now),
+    deleteFight: (code, fightId) => void delFight.run(code, fightId),
+    fights: (code) => (selFights.all(code) as { fight_id: string; data: string }[]).map((r) => ({ fightId: r.fight_id, data: r.data })),
     close: () => db.close(),
   };
 }

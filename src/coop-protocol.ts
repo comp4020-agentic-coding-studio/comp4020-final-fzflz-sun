@@ -90,6 +90,19 @@ export interface CoopFightEndedMsg {
   outcome: "won" | "wiped" | "abandoned";
 }
 
+/**
+ * Sent only to a player who personally left a fight that continues for
+ * others (an individual flee) — there's no `fightEnded` for them since the
+ * fight itself didn't end, so without this their own client would keep
+ * showing the fight dock it last had. `fightEnded` still covers the whole
+ * party leaving/dying/winning together.
+ */
+export interface CoopLeftFightMsg {
+  type: "leftFight";
+  fightId: string;
+  outcome: "fled";
+}
+
 export interface CoopCardView {
   id: string;
   name: string;
@@ -105,6 +118,14 @@ export interface CoopHandMsg {
   fightId: string;
   cards: CoopCardView[];
   energy: number;
+  /**
+   * The server's last-accepted action sequence number for this player in
+   * this fight. A refreshed client's own counter always starts back at 0, so
+   * it adopts this value (never going backwards) before sending its next
+   * action — otherwise that action is indistinguishable from a stale replay
+   * and the server correctly rejects it.
+   */
+  lastSeq: number;
 }
 
 export interface CoopActionErrorMsg {
@@ -112,7 +133,7 @@ export interface CoopActionErrorMsg {
   error: string;
 }
 
-export type CoopServerMsg = CoopHelloMsg | CoopStateMsg | CoopFightMsg | CoopFightEndedMsg | CoopHandMsg | CoopActionErrorMsg;
+export type CoopServerMsg = CoopHelloMsg | CoopStateMsg | CoopFightMsg | CoopFightEndedMsg | CoopLeftFightMsg | CoopHandMsg | CoopActionErrorMsg;
 
 export interface CoopMoveMsg {
   type: "move";

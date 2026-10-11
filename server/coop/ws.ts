@@ -2,9 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import type { CoopClientMsg, CoopFightEndedMsg, CoopHelloMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
+import type { CoopClientMsg, CoopFightEndedMsg, CoopHelloMsg, CoopLeftFightMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
 import { HttpError, json, parseCookies, readBody } from "../http.ts";
-import { FightSession, type FightAction } from "./fight-session.ts";
+import { CALM_TIME } from "../../src/roam.ts";
+import { FightSession, type FightAction, type PersistedFight } from "./fight-session.ts";
 import { CoopRoom, MEMBER_COLORS, type RoomEnemy } from "./room.ts";
 import { openCoopStore, type CoopStore } from "./store.ts";
 
@@ -69,6 +70,11 @@ export class CoopServer {
   private store: CoopStore;
   private rooms = new Map<string, CoopRoom>();
   private sockets = new Map<string, Set<{ ws: WebSocket; playerId: string }>>();
+  /** keyed by `${roomCode}:${playerId}`: bumped every time a connection is accepted for that player, so a replaced
+   * socket's own close handler (which fires asynchronously, possibly after the new one already connected) can tell
+   * it's no longer current and must not mark the player offline or arm a reconnect timer for a connection that's
+   * actually still live. */
+  private connGen = new Map<string, number>();
   private lastSaved = new Map<string, number>();
   /** keyed by `${roomCode}:${fightId}`, since a RoomFight's id is only unique within its own room. */
   private sessions = new Map<string, FightSession>();
@@ -132,6 +138,58 @@ export class CoopServer {
       }
     }
     for (const p of room.players.values()) p.online = false; // nobody has an open socket yet
+
+    // Reconstruct any fight that was still in progress when the server last
+    // stopped: full hands, round, energy and card instance ids, exactly
+    // where they were (server/coop/fight-session.ts's restore path) — not
+    // re-dealt, not re-resolved, not re-confirmed.
+    const resumed = new Set<string>();
+    for (const row of this.store.fights(code)) {
+      try {
+        const data = JSON.parse(row.data) as PersistedFight;
+        const rf = data.roomFight;
+        if (rf.enemyKeys.some((k) => !room.enemies.find((e) => e.key === k))) continue; // map changed under it: can't resume
+        room.fights.set(rf.id, rf);
+        const session = new FightSession(room, rf, Math.random, data);
+        this.sessions.set(sessionKey(code, rf.id), session);
+        resumed.add(rf.id);
+        for (const key of rf.enemyKeys) {
+          const e = room.enemies.find((x) => x.key === key)!;
+          e.state = "engaged";
+          e.fightId = rf.id;
+        }
+        for (const pid of rf.playerIds) {
+          const rp = room.players.get(pid);
+          if (rp) rp.fightId = rf.id;
+        }
+        // Nobody has an open socket right now — this is a cold room load, not a
+        // live disconnect — but the effect for each participant is the same:
+        // give them the normal reconnect window rather than instantly treating
+        // a restart as a mass flee.
+        for (const pid of rf.playerIds) this.armReconnectTimer(room, pid);
+      } catch {
+        // a corrupt fight row: fall through to the orphan-cleanup pass below instead of resuming it
+      }
+    }
+
+    // Compatibility: a legacy room_state snapshot (from before fight
+    // persistence existed) or a fight row that failed to resume can still
+    // leave an enemy marked "engaged" with nothing left to finish that fight
+    // — free it back to roaming rather than leaving it stuck forever, and
+    // never wipe the rest of the room to do it.
+    for (const e of room.enemies) {
+      if (e.state === "engaged" && (!e.fightId || !resumed.has(e.fightId))) {
+        e.state = "calm";
+        e.stateUntil = now / 1000 + CALM_TIME;
+        e.wanderTarget = null;
+        e.targetId = null;
+        e.fightId = null;
+      }
+    }
+    for (const p of room.players.values()) {
+      if (p.fightId && !resumed.has(p.fightId)) p.fightId = null;
+    }
+
     this.rooms.set(code, room);
     return room;
   }
@@ -225,6 +283,12 @@ export class CoopServer {
     // gets a second character in the room.
     for (const other of set) if (other.playerId === playerId && other.ws !== ws) other.ws.close(4000, "replaced by another tab");
     set.add(entry);
+    // This connection is now the current one for this player; a later close of
+    // an older, already-replaced socket (whose close event can still arrive
+    // after this point) must not undo that.
+    const genKey = `${room.code}:${playerId}`;
+    const myGen = (this.connGen.get(genKey) ?? 0) + 1;
+    this.connGen.set(genKey, myGen);
 
     const hello: CoopHelloMsg = {
       type: "hello",
@@ -263,8 +327,17 @@ export class CoopServer {
       }
     });
 
+    // idempotent: "close" and "error" can both fire for the same socket, and must only ever undo this exact connect once
+    let closed = false;
     const onClose = () => {
+      if (closed) return;
+      closed = true;
       set!.delete(entry);
+      // a second tab already replaced this connection (this fired after that
+      // newer onConnect already bumped the generation): the player is still
+      // online through the new socket, so don't mark them offline or start a
+      // reconnect countdown for a "disconnect" that never really happened.
+      if (this.connGen.get(genKey) !== myGen) return;
       room.setOnline(playerId, false, Date.now());
       if (set!.size === 0) this.sockets.delete(room.code);
       if (room.players.get(playerId)?.fightId) this.armReconnectTimer(room, playerId);
@@ -324,6 +397,12 @@ export class CoopServer {
     const result = session.applyAction(playerId, seq, action, Date.now() / 1000, Math.random);
     if (!result.ok) {
       this.sendTo(room, playerId, { type: "actionError", error: result.error ?? "rejected" });
+      // a stale/duplicate seq or an action against state that already moved on: push the
+      // authoritative view back so the client self-heals instead of the player needing to
+      // guess-and-retry their way back in sync.
+      this.sendTo(room, playerId, session.fightView());
+      const hand = session.handView(playerId);
+      if (hand) this.sendTo(room, playerId, hand);
       return;
     }
     this.afterFightChange(room, fightId, session, initialMembers);
@@ -335,15 +414,38 @@ export class CoopServer {
       const ended: CoopFightEndedMsg = { type: "fightEnded", fightId: session.id, outcome: session.ended };
       for (const pid of initialMembers) this.sendTo(room, pid, ended);
       this.sessions.delete(sessionKey(room.code, fightId));
+      this.store.deleteFight(room.code, fightId); // nothing left to resume: a restart must not find a ghost of this fight
+      this.persistRoomNow(room); // surviving/dead enemy state and freed players: don't wait for the debounce
     } else {
+      // someone who personally left (an individual flee) this round, while the fight
+      // itself continues for the rest: they get no fightEnded, so they need their own
+      // explicit "you're out" message or their client would keep showing the stale dock.
+      for (const pid of session.takeJustLeft()) {
+        const left: CoopLeftFightMsg = { type: "leftFight", fightId: session.id, outcome: "fled" };
+        this.sendTo(room, pid, left);
+      }
       const view = session.fightView();
       for (const pid of session.playerIds) {
         this.sendTo(room, pid, view);
         const hand = session.handView(pid);
         if (hand) this.sendTo(room, pid, hand);
       }
+      // the action that got us here (a card played, a round resolved, a flee taken) is now
+      // fully complete — persist it as one atomic write before confirming anything further,
+      // never mid-effect, so a restart can resume from exactly here.
+      this.persistFight(room.code, session);
     }
     this.broadcastState(room); // block/ready/hp changed: don't make the room wait for the next tick
+  }
+
+  private persistFight(roomCode: string, session: FightSession) {
+    this.store.putFight(roomCode, session.id, JSON.stringify(session.serialize()), Date.now());
+  }
+
+  private persistRoomNow(room: CoopRoom) {
+    const now = Date.now();
+    this.lastSaved.set(room.code, now);
+    this.store.putState(room.code, JSON.stringify(persist(room)), now);
   }
 
   private sendTo(room: CoopRoom, playerId: string, msg: CoopServerMsg) {
@@ -378,6 +480,9 @@ export class CoopServer {
           const hand = session.handView(pid);
           if (hand) this.sendTo(room, pid, hand);
         }
+        // persist the freshly-dealt opening state immediately: a crash before anyone's
+        // first action must still resume this fight, not drop it.
+        this.persistFight(code, session);
       }
       this.broadcastState(room);
       const last = this.lastSaved.get(code) ?? 0;
