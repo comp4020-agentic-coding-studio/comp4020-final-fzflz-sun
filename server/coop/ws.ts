@@ -63,7 +63,7 @@ function cleanName(raw: unknown, fallback: string): string {
 
 interface PersistedRoom {
   players: { id: string; x: number; y: number; hp: number }[];
-  enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number; phase: number }[];
+  enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number; phase: number; alive: boolean }[];
 }
 
 export class CoopServer {
@@ -518,7 +518,9 @@ function broadcast(sockets: Set<{ ws: WebSocket; playerId: string }>, msg: CoopS
 function persist(room: CoopRoom): PersistedRoom {
   return {
     players: [...room.players.values()].map((p) => ({ id: p.id, x: p.pos.x, y: p.pos.y, hp: p.hp })),
-    enemies: room.enemies.map((e) => ({ key: e.key, x: e.pos.x, y: e.pos.y, cx: e.center.x, cy: e.center.y, state: e.state, targetId: e.targetId, hp: e.hp, phase: e.phase })),
+    enemies: room.enemies.map((e) => ({
+      key: e.key, x: e.pos.x, y: e.pos.y, cx: e.center.x, cy: e.center.y, state: e.state, targetId: e.targetId, hp: e.hp, phase: e.phase, alive: e.alive,
+    })),
   };
 }
 
@@ -533,6 +535,11 @@ function restore(room: CoopRoom, data: PersistedRoom) {
     e.targetId = saved.targetId;
     e.hp = saved.hp;
     e.phase = saved.phase ?? 0;
+    // a pre-this-fix snapshot has no `alive` field at all: default true, since
+    // that's the only safe reading of data captured before dead enemies were
+    // ever tracked — but once a snapshot does have it, a confirmed kill must
+    // never come back, matching src/roam.ts/src/save.ts's same rule for solo.
+    e.alive = saved.alive ?? true;
   }
   for (const saved of data.players ?? []) {
     const p = room.players.get(saved.id);
