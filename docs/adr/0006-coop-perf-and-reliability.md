@@ -129,3 +129,56 @@ actual production Docker image (`pnpm check`, `pnpm check:browser`,
 passing. Not verified: a real non-localhost network's jitter against the
 180ms interpolation constant; multi-day or high-concurrency load; the
 attack-target rule has still not been played by a human.
+
+## Hardening addendum, 2026-10-11
+
+A further, more careful read of this same restart path — prompted by an
+independent review (Codex) that had already found and fixed one gap
+(`b2896df`: player HP/ready weren't part of the per-fight persisted
+record) — found four more, all still specifically in restart/recovery, not
+new architectural territory (hence an addendum here, not a new ADR
+number):
+
+- **No legacy-format compatibility.** A fight row written by the code that
+  existed between `3c658ca` and `b2896df` has neither `hp` nor `ready`;
+  restore read them unconditionally. Fixed with an explicit `version`
+  field and `migratePersistedFight()`: missing HP falls back to the
+  already-restored room-level snapshot (never `undefined`/`NaN`); missing
+  `ready` is derived from the legacy row's own accurate `pendingFlee` set,
+  so a player who'd committed to flee stays correctly unable to act —
+  documented as an explicit limit for anyone else, since a real historical
+  End Turn genuinely can't be reconstructed from data that never recorded
+  it. Structurally broken data returns `null`, never wiping the room.
+- **Fight-ID collision after a restart.** `CoopRoom.nextFightN` resets to 1
+  on every cold load and never advanced past a restored fight's id, so the
+  very next genuinely new encounter could collide with one already
+  resumed. Fixed with `CoopRoom.reserveFightId()`.
+- **A fled player could be re-locked.** The room-restore loop used the
+  fight's original, never-shrinking roster instead of its actual current
+  membership (which `FightSession`'s own restore already got right) to
+  decide who gets re-locked and reconnect-timed on a cold load. Fixed by
+  using `session.playerIds` instead of `RoomFight.playerIds` there.
+- **Fight-end persistence wasn't atomic, and notified before persisting.**
+  `deleteFight` and the final room snapshot write were two independent
+  statements, and `fightEnded` went out before either committed. Fixed with
+  `CoopStore.finishFight()` — `node:sqlite`'s `DatabaseSync` has no
+  transaction helper, but its `.exec()` runs raw SQL, so this wraps the
+  existing prepared statements in `BEGIN`/`COMMIT`/`ROLLBACK` directly —
+  and moved client notification to after that commit succeeds.
+
+**Verification**: real server restarts for all four — a planted
+legacy-shaped row (including one with a mid-flight `pendingFlee`)
+recovering correctly; two independently-triggered fights never colliding
+ids across a restart; a fled player coming back genuinely free while their
+former teammate's fight continues unaffected; a real kill staying dead
+across both a `docker restart` and a full rebuild-on-the-same-volume
+cycle. New unit tests for the migration function, fight-id reservation,
+`finishFight`'s atomicity/error-propagation, and the downed-vs-fled
+distinction. The four scenarios needing a real process boundary were
+turned into `tools/coop-restart-check.sh` (mirroring
+`tools/persistence-check.sh`'s own convention, local/pre-release only,
+since CI's own container can't actually test a restart — it uses
+`--tmpfs /data`); the scenarios that don't need one became
+`tools/coop-live-check.mjs`, wired into CI. Not verified: a real human
+two-player session; a real Fly-level restart (only the local production
+image has been restart-tested).

@@ -98,3 +98,30 @@ Run on 11 October against the uncommitted documentation changes above
 
 No new game, browser or performance checks were run. No commit, push or
 deployment was performed for this documentation change.
+
+## Update, 2026-10-11 (Claude Code)
+
+Both findings in this review's item 1 are fixed:
+
+- Player HP and ready status are now part of `FightSession`'s own
+  per-action persisted record (not left to the separately-debounced room
+  snapshot), fixed in `b2896df` and verified with a real server restart
+  (actual damage taken, immediate restart, HP restored exactly, not rolled
+  back to a stale value).
+- A further, more careful look at the same restart path (not prompted by
+  this review, but in the same spirit — reading the source again rather
+  than trusting the prior "resumes exactly" claim) found four more real
+  gaps: no legacy-format compatibility for a fight row missing `hp`/
+  `ready` entirely, a fight-id collision risk across a restart, a fled
+  player that could be re-locked on restore, and non-atomic fight-end
+  persistence with notification before persisting. All four are fixed and
+  verified with real server restarts; see
+  `docs/process/2026-10-11-coop-restart-hardening.md` and
+  `docs/adr/0006-coop-perf-and-reliability.md`'s hardening addendum for the
+  causes, fixes and evidence.
+
+This review's other findings (item 2: fight persistence and room updates
+as separate writes — now addressed by `CoopStore.finishFight`'s single
+transaction; item 3: `sourceRevision`/`worktreeDirty` describing the local
+checking checkout, not Fly — unchanged, and respected in all evidence
+produced this round) stand as originally recorded above.
