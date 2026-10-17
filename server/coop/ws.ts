@@ -261,11 +261,16 @@ export class CoopServer {
       return true;
     }
 
+    // A room code is an invite capability (knowing it is deliberately enough
+    // to join), not a public listing: this confirms a code exists so a join
+    // form can say "check the code or link" versus "room found, go ahead,"
+    // but reveals nothing about who's already there to an unauthenticated
+    // prober. See docs/adr/0007-coop-identity-and-permissions.md.
     const peekMatch = path.match(/^\/api\/coop\/rooms\/([A-Z0-9]{6})$/);
     if (peekMatch && req.method === "GET") {
       const code = peekMatch[1];
       if (!this.store.roomExists(code)) throw new HttpError(404, "no such room: check the code or link");
-      json(res, 200, { code, members: this.store.members(code).map((m) => ({ id: m.playerId, name: m.name, color: m.color })) });
+      json(res, 200, { code, memberCount: this.store.members(code).length });
       return true;
     }
 
