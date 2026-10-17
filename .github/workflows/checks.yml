@@ -58,6 +58,21 @@ jobs:
         # restart test here would prove nothing — see tools/coop-restart-check.sh,
         # run locally/pre-release instead, same as tools/persistence-check.sh.
         run: pnpm check:coop http://localhost:8080
+      - name: Check a crafted nickname never executes as markup
+        # Real headless Chrome: a crafted display name is never created as a
+        # live element and never executes, including as an attack-intent
+        # target; a normal Chinese/space name still displays as typed.
+        run: pnpm check:xss http://localhost:8080
+      - name: Check business logging fires with distinct, safe actor ids
+        # Spawns its own server/index.ts process (in a fresh temp data dir,
+        # not this job's container) since that's the only way to prove its
+        # own logging — not just CoopServer's, which already has unit-test
+        # seams — actually fires. Drives two real identities through a real
+        # action/rejection/flee/reconnect sequence plus a solo save write,
+        # then asserts the server's own captured stdout contains the
+        # expected event types with distinct actor ids and no raw cookie or
+        # stolen card content.
+        run: pnpm check:log
       - name: Keep browser screenshots and results
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
