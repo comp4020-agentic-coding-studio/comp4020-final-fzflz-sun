@@ -122,6 +122,33 @@ describe("coop identity and authorization", () => {
     conn2.ws.close();
   });
 
+  it("a replaced socket (same identity, second tab) cannot act; the live one still can", async () => {
+    const api = identity();
+    const room = await createRoom(api, "Replaced");
+    const old = await connect(room.code, api.cookie());
+    await sleep(100);
+    const fresh = await connect(room.code, api.cookie()); // same identity: this replaces `old`
+    await sleep(200);
+    expect(old.ws.readyState).not.toBe(WebSocket.OPEN); // the old socket was closed server-side
+
+    // sending on the now-closed old socket must not succeed or be misattributed
+    expect(() => old.send({ type: "move", dx: 1, dy: 0 })).not.toThrow();
+    await sleep(150);
+
+    // the live (replacement) socket can still act normally
+    fresh.send({ type: "move", dx: 1, dy: 0 });
+    await sleep(300);
+    fresh.send({ type: "move", dx: 0, dy: 0 });
+    await sleep(150);
+    const selfId = last(fresh, "hello").selfId;
+    const st = last(fresh, "state");
+    const me = st?.players.find((p: any) => p.id === selfId);
+    expect(me).toBeTruthy();
+    expect(me.online).toBe(true);
+
+    fresh.ws.close();
+  });
+
   it("the peek endpoint reveals existence but no member identities", async () => {
     const api = identity();
     const room = await createRoom(api, "Peeker");
