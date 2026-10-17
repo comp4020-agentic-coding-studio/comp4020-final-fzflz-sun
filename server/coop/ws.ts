@@ -705,8 +705,51 @@ export class CoopServer {
     return this.sessions.has(sessionKey(code, fightId));
   }
 
+  /** Test-only: registers an already-constructed session the way tickAll's new-fight path would, so a test can drive real actions against it without a real WebSocket connecting first. */
+  testRegisterSession(roomCode: string, fightId: string, session: FightSession): void {
+    this.sessions.set(sessionKey(roomCode, fightId), session);
+  }
+
   testPendingFinishCount(): number {
     return this.pendingFinishes.size;
+  }
+
+  /** Test-only: drives a fight action through the same path a real WebSocket message does, without needing a real socket — so a test can assert on the logger's exact output for a real rejection/success. */
+  testHandleFightAction(room: CoopRoom, playerId: string, seq: number, raw: { type: string } & Record<string, unknown>): void {
+    this.handleFightAction(room, playerId, seq, raw);
+  }
+
+  /** Test-only: drives the REST room-create/join/peek path through a fake request/response pair, so a test can assert on the logger's exact output without a real HTTP server. */
+  async testHandleApi(method: string, path: string, body: unknown, cookie?: string): Promise<{ status: number; body: unknown; setCookie?: string }> {
+    let status = 0;
+    let resBody: unknown;
+    let setCookie: string | undefined;
+    const req = {
+      method,
+      headers: cookie ? { cookie } : {},
+      on(event: string, cb: (chunk?: Buffer) => void) {
+        if (event === "data") cb(Buffer.from(JSON.stringify(body ?? {})));
+        if (event === "end") cb();
+      },
+    } as unknown as IncomingMessage;
+    const res = {
+      setHeader(name: string, value: string) {
+        if (name === "set-cookie") setCookie = value;
+      },
+      writeHead(code: number) {
+        status = code;
+      },
+      end(data: string) {
+        resBody = data ? JSON.parse(data) : undefined;
+      },
+    } as unknown as ServerResponse;
+    try {
+      await this.handleApi(req, res, path);
+    } catch (e) {
+      if (e instanceof HttpError) return { status: e.status, body: { error: e.message }, setCookie };
+      throw e;
+    }
+    return { status, body: resBody, setCookie };
   }
 
   private tickAll() {

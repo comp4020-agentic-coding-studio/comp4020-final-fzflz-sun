@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { LogEvent, LogSink } from "../log.ts";
 import { FightSession } from "./fight-session.ts";
 import { CoopRoom, type RoomFight } from "./room.ts";
 import { openCoopStore, type CoopStore } from "./store.ts";
@@ -149,4 +150,157 @@ describe("CoopServer: a finishFight failure must never falsely signal success", 
 
     server.close();
   });
+});
+
+/** Captures every LogEvent passed to it, in order, for exact assertions. */
+function capturingSink(): LogSink & { events: LogEvent[] } {
+  const events: LogEvent[] = [];
+  return { events, log: (e) => events.push(e) };
+}
+
+describe("CoopServer: business logging", () => {
+  it("logs distinct, stable actor ids for two different identities doing the same thing", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+
+    const a = await server.testHandleApi("POST", "/api/coop/rooms", { name: "Ash" });
+    const code = (a.body as { code: string }).code;
+    const b = await server.testHandleApi("POST", `/api/coop/rooms/${code}/join`, { name: "Ash" }, "cc_coop=" + "b".repeat(43));
+
+    const creates = log.events.filter((e) => e.event === "coop.room.create");
+    const joins = log.events.filter((e) => e.event === "coop.room.join");
+    expect(creates).toHaveLength(1);
+    expect(joins).toHaveLength(1);
+    expect(creates[0].actorId).not.toBe(joins[0].actorId);
+    expect(creates[0].actorId).toBeTruthy();
+    expect(joins[0].actorId).toBeTruthy();
+    // same display name, still different actor ids
+    expect(creates[0].actorName).toBe("Ash");
+    expect(joins[0].actorName).toBe("Ash");
+
+    server.close();
+  });
+
+  it("the peek endpoint logs whether the room existed, without leaking member identities", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+
+    const created = await server.testHandleApi("POST", "/api/coop/rooms", { name: "Ash" });
+    const code = (created.body as { code: string }).code;
+
+    const ok = await server.testHandleApi("GET", `/api/coop/rooms/${code}`, undefined);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ code, memberCount: 1 });
+
+    const missing = await server.testHandleApi("GET", "/api/coop/rooms/ZZZZZZ", undefined);
+    expect(missing.status).toBe(404);
+
+    const peeks = log.events.filter((e) => e.event === "coop.room.peek");
+    expect(peeks).toHaveLength(2);
+    expect(peeks[0].result).toBe("ok");
+    expect(peeks[1].result).toBe("rejected");
+    expect(peeks[1].reason).toBe("no_such_room");
+
+    server.close();
+  });
+
+  it.each([
+    { setupSeq: 1, action: { type: "playCard", cardInstanceId: "not-a-real-card" }, expectReason: "card_not_in_hand" },
+    { setupSeq: 0, action: { type: "endTurn" }, expectReason: "stale_seq" },
+  ])("logs a stable reason code for a rejected action ($expectReason)", ({ setupSeq, action, expectReason }) => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+
+    if (setupSeq === 0) {
+      // consume seq 1 first so a repeat of seq 1 below is genuinely stale
+      session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    }
+    server.testHandleFightAction(room, "p1", 1, action);
+
+    const rejections = log.events.filter((ev) => ev.event === "coop.action.rejected");
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0].reason).toBe(expectReason);
+    expect(rejections[0].actorId).toBeTruthy();
+    // never leaks the attempted content
+    expect(JSON.stringify(rejections[0])).not.toContain("not-a-real-card");
+
+    server.close();
+  });
+
+  it("a rejected cross-player card attempt never logs the victim's hand content", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+
+    const bCardId = session.handView("p2")!.cards[0].id;
+    server.testHandleFightAction(room, "p1", 1, { type: "playCard", cardInstanceId: bCardId });
+
+    const rejections = log.events.filter((ev) => ev.event === "coop.action.rejected");
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0].reason).toBe("card_not_in_hand");
+    // the stolen card id itself must never appear anywhere in the rejection log line
+    expect(JSON.stringify(rejections[0])).not.toContain(bCardId);
+
+    server.close();
+  });
+
+  it("a crafted display name produces exactly one valid JSON log line end to end", async () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    // room names are trimmed to NAME_MAX (24) by cleanName before this ever
+    // reaches the logger — this payload fits within that bound so the test
+    // exercises the real end-to-end path, not a hypothetical untruncated one.
+    const XSS_NAME = `<img src=x o="y">`;
+
+    await server.testHandleApi("POST", "/api/coop/rooms", { name: XSS_NAME });
+
+    const created = log.events.find((e) => e.event === "coop.room.create")!;
+    expect(created.actorName).toBe(XSS_NAME);
+    // formatLogLine itself is unit-tested in server/log.test.ts; this confirms
+    // ws.ts actually calls it with the real attacker-controlled value, not a
+    // sanitized/pre-escaped copy that would hide a future regression.
+    const { formatLogLine } = await import("../log.ts");
+    const line = formatLogLine(created);
+    expect(line.split("\n")).toHaveLength(1);
+    expect(JSON.parse(line).actorName).toBe(XSS_NAME);
+
+    server.close();
+  });
+
 });
