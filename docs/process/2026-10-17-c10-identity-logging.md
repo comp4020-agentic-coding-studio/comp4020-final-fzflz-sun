@@ -1,7 +1,7 @@
 # Stage card: Crit 10 — identity, permissions and server-side logging
 
 Title / date: Crit 10 "Fly by instruments", 2026-10-17
-Status: proposed
+Status: implemented and verified locally (including the production Docker image); not yet deployed; awaiting a real human two-person demo
 Starting commit: `a13d462` (round 4's final, locally-verified state)
 
 ## Player problem and evidence
@@ -156,17 +156,97 @@ by URL alone."
 
 ## Review evidence
 
-(Filled in as each piece lands.)
+- **2026-10-17, agent, local (Node 24, macOS)**: `pnpm typecheck` clean;
+  `pnpm test:unit` 423 tests passing (new: `server/log.test.ts` 9 tests
+  for `formatLogLine`'s JSON-line safety against normal and crafted
+  input; `server/coop/ws.test.ts` extended with 6 new tests asserting
+  exact log content — distinct actor ids for distinct identities, a
+  stable reason code per rejection scenario, no attempted content or
+  stolen card id ever logged, a crafted name producing one valid JSON
+  line through the real call site); `pnpm check:evidence` passed (22
+  cited commits, all resolve).
+- **2026-10-17, agent, real HTTP/WebSocket against the dev server**
+  (`spec/coop-auth.test.ts`, new, 10 tests): two identities sharing a
+  display name get distinct stable ids; reconnect keeps identity; a
+  replaced socket (same identity, second tab) cannot act while the live
+  one still can; the peek endpoint's response has no member identities;
+  a non-member cannot open the room's socket; a code-only invite-link
+  join succeeds; a forged player id in a move message never moves
+  another player; a stolen card instance id is rejected and leaves the
+  victim's hand/energy untouched; a player never receives another's
+  hand; a rejected action never disturbs the legitimate player's next
+  real action. `pnpm check` (typecheck + full spec/unit suite) passed at
+  444 tests.
+- **2026-10-17, agent, a real spawned server process**
+  (`tools/coop-log-check.mjs`, new): drove two real identities through
+  create/join/connect, a rejected cross-player card attempt, a real card
+  play, a flee, B finishing the fight, A's disconnect/reconnect, and a
+  solo save write. The server's own captured stdout contained every
+  required event type with two distinct actor ids, and neither player's
+  raw cookie token nor the stolen card's instance id ever appeared
+  anywhere in the output. Stable across repeated local runs.
+- **2026-10-17, agent, real headless Chrome, two separate profiles**
+  (`tools/coop-identity-demo-check.mjs`, new): tab A creates a room and
+  reads its own invite link from the rendered page; tab B joins using
+  only that link; both reach a shared fight via live keyboard steering;
+  each plays a real card with no cross-contamination of hand/energy
+  state; one flees (after B also ends their turn — readying up only
+  resolves once every active player has) while the other's fight
+  concludes normally; A's tab is closed and reopened on the same profile
+  and resumes the same identity. Two real bugs were found and fixed in
+  the check itself during development (see the correction record below),
+  not in the product; stable across 5+ repeated runs after both fixes.
+- **2026-10-17, agent, the actual production Docker image** (fresh
+  container, `--tmpfs /data`): `APP_URL=... pnpm check` passed (444
+  tests); `pnpm check:browser` passed in full (real fight, save round
+  trip, visitor isolation, phone touch, resize mid-fight); `pnpm check:deploy`
+  passed (`ok: true`, real save round trip, visitor isolation, test
+  visitors erased); `tools/coop-identity-demo-check.mjs` and
+  `tools/coop-log-check.mjs` (base-URL mode) both passed;
+  `tools/coop-live-check.mjs` passed 5/5 repeated runs; `docker logs`
+  against the running container confirmed real business log lines
+  (`coop.room.create`, `coop.fight.ended`, etc.) appear exactly as
+  `tools/coop-log-check.mjs`'s spawn-mode assertions expect — this is
+  the same mechanism `flyctl logs` relies on in production.
+- **Known pre-existing flake, not a regression**: `tools/coop-xss-check.mjs`
+  (built in round 4, unchanged by this round — confirmed via `git diff`
+  against `a13d462` showing zero changes) intermittently fails its
+  "both players enter a shared fight" step, roughly 1 run in 3, both on
+  the dev server and the production container, both before and
+  unaffected by this round's work. Root cause: its fixed w+d diagonal
+  heading can walk the pair toward a farther camp (observed: `north`'s
+  three-enemy pack, ~13s away) instead of the intended, much closer
+  `west-1`, exceeding its 10-second fight-formation wait budget — the
+  same class of issue round 3's own correction record already documented
+  for a different check (`coop-formation-2p-check.mjs`'s fixed diagonal
+  geometrically missing a spawn by design). Not fixed as part of this
+  round, since it's orthogonal to C10's own scope; worth a future pass
+  reusing this round's live-steering fix from `coop-identity-demo-check.mjs`.
+- **Not run as part of this round**: a real Fly deploy, and `flyctl logs`
+  exercised against it — both require an actual deploy, which is pending
+  the user's go-ahead (see Deployment below).
+- **Author feedback**: none yet. **Independent/real two-person
+  evidence**: none; the live crit-10 demo (two real people, narrated from
+  `flyctl logs` alone) remains the explicit next step.
 
 ## Correction record
 
 | Observed problem | Agreed rule | Fix / check | Result |
 | --- | --- | --- | --- |
-| (filled in during implementation) | | | |
+| `tools/coop-identity-demo-check.mjs`'s fixed w+d keyboard heading could geometrically miss the target enemy's actual spawn point, same class of issue as round 3's `coop-formation-2p-check.mjs` finding | A demo-flow check must reliably reach a fight, not rely on luck | replaced the fixed heading with live per-step steering toward the real spawn coordinate, recomputed from the tab's own reported position each iteration | stable across 5+ repeated runs |
+| The same tool's plain `chrome.kill()` on "close and reopen the same profile" raced Chrome's own cookie-database flush to disk — a reopened profile could see a vanished or different `cc_coop` cookie even though the profile directory itself was kept intact | A reconnect check must prove identity survives via the real cookie, not assume it from the profile directory surviving | ask Chrome to shut down cleanly via CDP's `Browser.close` before killing the process, confirmed by comparing the raw cookie token across a close/reopen cycle directly | reconnect check passes consistently afterward |
+| `tools/coop-identity-demo-check.mjs`'s flee step assumed a single click would close the fight dock instantly | Fleeing only readies up; the round (and the actual flee) only resolves once every active player has readied — the same real multiplayer rule, not a bug | the check now has B end their own turn too before asserting A's dock closed | check passes once the real resolution timing is respected |
 
 ## Reviewed implementation commits
 
-(filled in once committed)
+- `928d546` — ADR 0007, the peek-endpoint fix, `spec/coop-auth.test.ts`.
+- `b769e3f` — `server/log.ts` and `server/log.test.ts` (not yet wired in).
+- `8db22eb` — wires logging into every real coop/solo call site.
+- `43d501c` — extends `server/coop/ws.test.ts` with log-content assertions.
+- `d1c28ba` — `tools/coop-log-check.mjs`; wires it and `coop-xss-check.mjs` into CI.
+- `c4e6e42` — `tools/coop-identity-demo-check.mjs`.
+- `59b6dbd` — adds the replaced-socket spec test.
+- `78214a9` — PROCESS.md, `reflections/crit-10.md`, README.md draft addition.
 
 ## Deployment
 
