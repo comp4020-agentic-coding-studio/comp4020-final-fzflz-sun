@@ -1,5 +1,5 @@
 import kaplay from "kaplay";
-import type { CoopClientMsg, CoopFightMsg, CoopHandMsg, CoopServerMsg } from "./coop-protocol.ts";
+import { escapeHtml, type CoopClientMsg, type CoopFightMsg, type CoopHandMsg, type CoopServerMsg } from "./coop-protocol.ts";
 import { PLAYER_JOIN_RADIUS } from "./encounter.ts";
 import { formationBounds, layoutFormation, planCamera, type Unit as FormationUnit, type V, type Viewport } from "./formation.ts";
 import { AREAS, ENEMY_SPAWNS, PLAYER_EDGE, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
@@ -650,10 +650,14 @@ function renderFight() {
       const btn = el as HTMLButtonElement;
       btn.disabled = e.downed;
       btn.setAttribute("aria-pressed", String(selectedTargetKey === e.key));
+      // e.role/e.hp/e.maxHp/intentLabel are all server-enum/numeric data, never
+      // player-supplied — but targetName is a room member's display name
+      // (attacker-controlled: the server only trims/truncates it, never
+      // strips HTML), so it must be escaped before touching innerHTML.
       const targetName = e.intent?.kind === "attack" ? roomMemberName(e.intent.targetId) : null;
       setHtml(
         btn,
-        `<span class="name">${e.role}${e.downed ? " (down)" : ""}</span><br>HP ${e.hp}/${e.maxHp}<br>${intentLabel(e.intent)}${targetName ? ` → ${targetName}` : ""}`,
+        `<span class="name">${e.role}${e.downed ? " (down)" : ""}</span><br>HP ${e.hp}/${e.maxHp}<br>${intentLabel(e.intent)}${targetName ? ` → ${escapeHtml(targetName)}` : ""}`,
       );
       btn.onclick = () => {
         selectedTargetKey = selectedTargetKey === e.key ? null : e.key;
@@ -723,6 +727,15 @@ function setText(el: HTMLElement, text: string) {
   if (el.textContent !== text) el.textContent = text;
 }
 
+/** Clears all local fight-dock state and re-renders (hidden, since currentFight is now null). Shared by fightEnded, leftFight, and the hello-reconnect-gap case — every path that means "this client is not showing an active fight anymore." */
+function closeFightDock() {
+  currentFight = null;
+  currentHand = null;
+  selectedTargetKey = null;
+  fightFormation = null;
+  renderFight();
+}
+
 ui.endTurnBtn.onclick = () => sendAction({ type: "endTurn", seq: nextSeq() });
 ui.fleeBtn.onclick = () => sendAction({ type: "flee", seq: nextSeq() });
 
@@ -775,6 +788,14 @@ function connectSocket() {
     if (msg.type === "hello") {
       selfId = msg.selfId;
       for (const m of msg.room.members) memberNames.set(m.id, m.name);
+      // the server's authoritative word on this player's current fight. If a
+      // fight concluded entirely while this socket was disconnected, there's
+      // no other message the server could send to catch this client up (no
+      // `fight`/`fightEnded`/`leftFight` for a fight that's already gone) —
+      // so an existing tab reconnecting over this same page (not a fresh
+      // load, which starts with no fight state anyway) must drop any stale
+      // fight dock it's still holding when the server reports no active fight.
+      if (msg.fightId === null && currentFight) closeFightDock();
     } else if (msg.type === "state") {
       applyState(msg);
       for (const p of msg.players) memberNames.set(p.id, p.name);
@@ -790,21 +811,22 @@ function connectSocket() {
       actionSeq = Math.max(actionSeq, msg.lastSeq);
       scheduleRenderFight();
     } else if (msg.type === "fightEnded") {
-      currentFight = null;
-      currentHand = null;
-      selectedTargetKey = null;
-      fightFormation = null;
-      renderFight();
-      showFightEndFeedback(msg.outcome);
+      // a message about fight X must never mutate the view of a DIFFERENT
+      // fight Y this client has since moved on to (e.g. fled X, joined Y, and
+      // X's fightEnded arrives after the fact) — the server itself now
+      // filters this (server/coop/ws.ts's afterFightChange), but the client
+      // checks too, rather than depending entirely on that filtering.
+      if (!currentFight || msg.fightId === currentFight.fightId) {
+        closeFightDock();
+        showFightEndFeedback(msg.outcome);
+      }
     } else if (msg.type === "leftFight") {
       // the fight itself continues for the rest of the party: only this
       // client's own dock closes, distinct from a whole-fight fightEnded.
-      currentFight = null;
-      currentHand = null;
-      selectedTargetKey = null;
-      fightFormation = null;
-      renderFight();
-      setStatus(`${roomStatusPrefix()} — you fled; your party keeps fighting`);
+      if (!currentFight || msg.fightId === currentFight.fightId) {
+        closeFightDock();
+        setStatus(`${roomStatusPrefix()} — you fled; your party keeps fighting`);
+      }
     } else if (msg.type === "actionError") {
       setText(ui.fightError, msg.error);
     }

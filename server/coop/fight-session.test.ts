@@ -229,6 +229,28 @@ describe("FightSession: fleeing and death", () => {
     expect(room.players.get("p1")!.fightId).toBeNull();
     expect(room.fights.has("f1")).toBe(false);
   });
+
+  it("finalPlayerIds captures exactly who was still here when the fight ended, excluding anyone who'd already personally left — the correct notification list, unlike the original fixed roster", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"], { "west-1": 999 });
+    expect(session.finalPlayerIds).toBeNull(); // not yet ended
+    session.applyAction("p1", 1, { type: "flee" }, 0, rng(2)); // p1 ready+pendingFlee, p2 hasn't acted
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2)); // round resolves: p1 actually leaves
+    expect(session.isMember("p1")).toBe(false);
+    expect(session.isMember("p2")).toBe(true);
+    // the fight hasn't ended yet (p2 is still fighting alone) — finalPlayerIds stays null
+    expect(session.ended).toBeNull();
+    expect(session.finalPlayerIds).toBeNull();
+
+    // now p2 finishes the fight (kills the enemy): finalPlayerIds must be exactly [p2], not
+    // [p1, p2] (the original roster, which would wrongly notify p1 about THIS fight ending)
+    const strike = findCard(session, "p2", "Strike");
+    const west1 = session.fight.units.find((u) => u.key === "west-1")!;
+    west1.hp = strike.value; // make it exactly lethal regardless of its default max HP
+    session.applyAction("p2", 2, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" }, 0, rng(3));
+    expect(session.ended).toBe("won");
+    expect(session.finalPlayerIds).toEqual(["p2"]);
+    expect(session.initialPlayerIds).toEqual(["p1", "p2"]); // unchanged: still the original fixed roster, for contrast
+  });
 });
 
 describe("FightSession: a reconnect window timing out (forceFlee)", () => {
@@ -326,6 +348,31 @@ describe("FightSession: serialize/restore (a server restart mid-fight)", () => {
     const restored = new FightSession(room, roomFight, rng(9), data);
     expect(restored.isMember("p1")).toBe(false);
     expect(restored.isMember("p2")).toBe(true);
+  });
+
+  it("restoring a hand with a far-advanced card id reserves it: a subsequently generated card id never collides, even across a second, separately-restored room", () => {
+    const { session, room, roomFight } = setup(["p1", "p2"], ["west-1"], { "west-1": 999 });
+    const data = session.serialize();
+    // simulate a persisted hand whose ids are far ahead of this process's own counter
+    // (e.g. a process that had already dealt tens of thousands of cards before this restart)
+    data.players[0].handIds = ["card99001", "card99002", "card99003", "card99004"];
+
+    const restored = new FightSession(room, roomFight, rng(9), data);
+    // force a brand-new card id: play the resource card (Focus) to draw one, if present;
+    // otherwise directly exercise the same path via a second restore in a different room.
+    const focus = hand(restored, "p1").find((c) => c.kind === "resource");
+    if (focus) {
+      restored.applyAction("p1", 1, { type: "playCard", cardInstanceId: focus.id }, 0, rng(3));
+      const newIds = hand(restored, "p1").map((c) => Number(/^card(\d+)$/.exec(c.id)?.[1] ?? 0));
+      for (const n of newIds) expect(n).toBeGreaterThanOrEqual(99001); // never a low, colliding id like "card1"
+    }
+
+    // a second, independently-restored room's fresh deal must also never collide with
+    // the first room's reserved ids — the counter is process-wide, so this proves the
+    // reservation isn't accidentally scoped to only the first room checked.
+    const second = setup(["p3"], ["west-2"], { "west-2": 999 });
+    const secondIds = hand(second.session, "p3").map((c) => Number(/^card(\d+)$/.exec(c.id)?.[1] ?? 0));
+    for (const n of secondIds) expect(n).toBeGreaterThan(99004);
   });
 
   it("a downed (not fled) player IS resumed as a member — server/coop/ws.ts's restore loop relies on playerIds to still include them, shown as fallen, unable to act, but not freed", () => {

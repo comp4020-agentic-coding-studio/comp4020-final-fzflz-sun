@@ -2,6 +2,22 @@
 // server/coop/room.ts) and the client (src/coop-main.ts), so the two sides
 // can't drift silently the way an inline object literal on each end could.
 
+/**
+ * A room member's display name is attacker-controlled (the server only
+ * trims/truncates it — see server/coop/ws.ts's cleanName — it never strips
+ * or blocks HTML) and is shown back to other players, including inside
+ * src/coop-main.ts's innerHTML-built fight dock. Anything interpolated into
+ * HTML from a name (or any other player-supplied string) must go through
+ * this first, or a crafted name like `<svg/onload=...>` would execute in
+ * every client that renders it. A matching private copy already exists in
+ * src/main.ts and server/readme.ts for solo; this one is exported so both
+ * sides of co-op share exactly one implementation instead of a third copy
+ * silently drifting from the other two.
+ */
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
 export interface CoopPlayerView {
   id: string;
   name: string;
@@ -33,6 +49,16 @@ export interface CoopHelloMsg {
   type: "hello";
   selfId: string;
   room: { code: string; members: { id: string; name: string; color: string }[] };
+  /**
+   * This player's authoritative fight membership right now, so a client
+   * reconnecting over an *existing* socket (not a fresh page load — those
+   * start with no fight state anyway) can tell whether to drop any fight
+   * dock it still has in memory. If a fight concluded entirely while this
+   * player was disconnected, the server has no other message to send them
+   * (there's no catch-up `fight`/`leftFight` for a fight that's already
+   * gone) — this field is how `hello` alone can still carry that fact.
+   */
+  fightId: string | null;
 }
 
 export interface CoopStateMsg {

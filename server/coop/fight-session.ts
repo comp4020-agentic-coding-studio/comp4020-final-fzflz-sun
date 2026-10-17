@@ -104,8 +104,29 @@ export const FIGHT_PERSIST_VERSION = 1;
 
 const EMPTY_PILES: Piles = { draw: [], hand: [], discard: [], exhaust: [] };
 
+// Module-level, process-wide: card ids only need to be unique within a
+// single process's lifetime (no persisted global registry), but the counter
+// itself is shared across every room/fight in the process, so a restore in
+// one room must not leave it able to collide with a fresh id minted later —
+// in this room, or any other room restored or formed afterward.
 let cardIdN = 1;
 const newCardId = () => `card${cardIdN++}`;
+
+/**
+ * Mirrors server/coop/room.ts's reserveFightId: a restored hand's ids
+ * (e.g. "card47") must never be reused by a later newCardId() call, in this
+ * room or any other — `cardIdN` only resets to 1 at process start, so
+ * without this a restart's restored hands could collide with whatever a
+ * freshly-dealt hand generates afterward (card ids were never advanced past
+ * a restored fight the way fight ids already are). Call this for every id in
+ * every restored player's `handIds`.
+ */
+function reserveCardId(id: string): void {
+  const m = /^card(\d+)$/.exec(id);
+  if (!m) return;
+  const n = Number(m[1]);
+  if (Number.isFinite(n) && n >= cardIdN) cardIdN = n + 1;
+}
 
 /**
  * A fight row read back from server/coop/store.ts's `fights` table may
@@ -213,6 +234,17 @@ export class FightSession {
    * explicit message (there's no `fightEnded` for them, since the fight itself didn't end) so their own client
    * actually closes its fight dock instead of it sitting on the last view it had. Cleared by takeJustLeft(). */
   private justLeft: string[] = [];
+  /**
+   * Who was actually still a member of this fight at the exact moment it
+   * concluded — captured by finish() before playerStates is cleared and
+   * every member's RoomPlayer.fightId is nulled. `initialPlayerIds` is too
+   * broad (includes anyone who personally left earlier and may since have
+   * joined an unrelated fight); the live room.players lookup is too narrow
+   * by the time ws.ts's afterFightChange runs (finish() already cleared it).
+   * This is the one list that's actually correct: set only once, when the
+   * fight ends, never before.
+   */
+  finalPlayerIds: string[] | null = null;
   ended: FightOutcome | null = null;
 
   /**
@@ -254,6 +286,9 @@ export class FightSession {
         // (structurally present, shown as fallen) exactly like live play, just like the rest.
         if (!saved.fled) {
           this.playerStates.set(saved.id, { id: saved.id, piles: saved.piles, handIds: saved.handIds, energy: saved.energy, lastSeq: saved.lastSeq });
+          // the restored hand's card ids must never be reused by a later newCardId() call —
+          // not for this player, not for anyone else's fresh deal in this room or any other.
+          for (const cardId of saved.handIds) reserveCardId(cardId);
         }
       }
       for (const pid of restore.pendingFlee) this.pendingFlee.add(pid);
@@ -450,6 +485,11 @@ export class FightSession {
 
   private finish(now: number, outcome: FightOutcome) {
     this.ended = outcome;
+    // capture exactly who's still here before anything below clears playerStates
+    // or nulls their RoomPlayer.fightId — this is the one correct list ws.ts can
+    // use to notify, independent of both the original fixed roster (too broad)
+    // and the post-finish room state (too narrow/already mutated).
+    this.finalPlayerIds = this.playerIds;
     const { dead } = endFight(this.fight);
     for (const key of dead) {
       const e = this.enemyByKey.get(key);
