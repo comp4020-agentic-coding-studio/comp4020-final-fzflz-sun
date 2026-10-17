@@ -206,7 +206,9 @@ failure).
 
 ## Reviewed implementation commits
 
-(filled in once committed; no commits made yet as of writing)
+- `43409a3` — the four fixes, with unit tests.
+- `f1c744a` — strengthened `tools/coop-live-check.mjs`/`coop-restart-check.mjs`/`.sh`, new `tools/coop-xss-check.mjs`.
+- `996e98b` — ADR 0006 addendum, this stage card, PROCESS.md.
 
 ## Deployment
 
