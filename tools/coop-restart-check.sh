@@ -7,16 +7,20 @@
 # tools/coop-restart-check.mjs) instead of plain curl, since co-op needs a
 # live connection to drive a fight.
 #
-# Covers the four round-3 fixes end to end, against an actual process
-# boundary (a unit test calling the FightSession constructor directly
-# proves the restore *logic*; this proves server/coop/ws.ts and
-# server/coop/store.ts actually wire it together correctly):
+# Covers the round-3 and round-4 restart-dependent fixes end to end, against
+# an actual process boundary (a unit test calling the FightSession
+# constructor directly proves the restore *logic*; this proves
+# server/coop/ws.ts and server/coop/store.ts actually wire it together
+# correctly):
 #   1. legacy fight-row compatibility (no version/hp/ready, including a
 #      mid-flight pendingFlee)
 #   2. fight-id collision avoidance after a restart
 #   3. a fled player is not re-locked into the fight they left
 #   4. atomic fight-end persistence (victory + immediate restart: the
 #      killed enemy stays dead)
+#   5. card-instance-id collision across a restart (two concurrent rooms'
+#      restored hands keep their exact ids, and a freshly-drawn card
+#      afterward collides with neither)
 #
 # Not wired into CI: this job's own container uses a real named volume (not
 # --tmpfs), and `docker restart` needs real time to actually stop/start the
@@ -82,6 +86,9 @@ legacy_fled_state=$(run_node setup-legacy-fled "$URL")
 legacy_fled_code=$(node -e 'console.log(JSON.parse(process.argv[1]).code)' "$legacy_fled_state")
 strip_legacy_fields "$legacy_fled_code"
 
+echo "# fix 5: card-instance-id collision across a restart (two concurrent rooms)"
+cardid_state=$(run_node setup-cardid "$URL")
+
 echo "# restart the container"
 restart
 
@@ -99,6 +106,9 @@ run_node verify-legacy "$URL" "$legacy_state" || fail "legacy-compat check faile
 
 echo "## verify: legacy row with mid-flight pendingFlee"
 run_node verify-legacy-fled "$URL" "$legacy_fled_state" || fail "legacy-pendingFlee check failed"
+
+echo "## verify: card-instance-id collision across the restart"
+run_node verify-cardid "$URL" "$cardid_state" || fail "card-id collision check failed"
 
 echo "# delete the container, rebuild the image, start fresh on the same volume (what a Fly redeploy does)"
 docker rm -f "$NAME" >/dev/null
