@@ -234,6 +234,8 @@ export class FightSession {
    * explicit message (there's no `fightEnded` for them, since the fight itself didn't end) so their own client
    * actually closes its fight dock instead of it sitting on the last view it had. Cleared by takeJustLeft(). */
   private justLeft: string[] = [];
+  /** Players who went down (hp hit 0) during the enemy turn that just resolved, for ws.ts to log. Cleared by takeJustDowned(). */
+  private justDowned: string[] = [];
   /**
    * Who was actually still a member of this fight at the exact moment it
    * concluded — captured by finish() before playerStates is cleared and
@@ -446,6 +448,7 @@ export class FightSession {
   }
 
   private resolveRound(now: number, rng: () => number) {
+    const downedBefore = new Set(this.fight.players.filter((p) => p.downed).map((p) => p.id));
     for (const [pid, ps] of this.playerStates) {
       const p = playerById(this.fight, pid)!;
       if (!p.downed && !p.fled) discardHand(ps.piles);
@@ -453,6 +456,7 @@ export class FightSession {
     beginEnemyTurn(this.fight);
     const plan = planEnemyTurn(this.fight);
     for (const ev of plan.events) applyEnemyEvent(this.fight, ev);
+    this.justDowned = this.fight.players.filter((p) => p.downed && !downedBefore.has(p.id)).map((p) => p.id);
 
     // a flee requested this round resolves now, after the shown actions already landed
     for (const pid of this.pendingFlee) markFled(this.fight, pid);
@@ -480,6 +484,13 @@ export class FightSession {
   takeJustLeft(): string[] {
     const out = this.justLeft;
     this.justLeft = [];
+    return out;
+  }
+
+  /** The players who went down during the enemy turn that just resolved, once, for ws.ts to log. */
+  takeJustDowned(): string[] {
+    const out = this.justDowned;
+    this.justDowned = [];
     return out;
   }
 

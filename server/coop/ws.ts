@@ -5,6 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { CoopClientMsg, CoopFightEndedMsg, CoopHelloMsg, CoopLeftFightMsg, CoopServerMsg } from "../../src/coop-protocol.ts";
 import { HttpError, json, parseCookies, readBody } from "../http.ts";
 import { CALM_TIME } from "../../src/roam.ts";
+import { stdoutSink, type LogSink } from "../log.ts";
 import { FightSession, migratePersistedFight, type FightAction } from "./fight-session.ts";
 import { CoopRoom, MEMBER_COLORS, type RoomEnemy } from "./room.ts";
 import { openCoopStore, type CoopStore } from "./store.ts";
@@ -25,6 +26,8 @@ const SAVE_DEBOUNCE_MS = 2000;
 const NAME_MAX = 24;
 /** A disconnect mid-fight gets this long to reconnect before it's resolved as a normal, costed flee. */
 const RECONNECT_WINDOW_MS = 30_000;
+/** A continuously-moving player still gets a coop.move.summary log line at least this often, so movement never goes silent. */
+const MOVE_SUMMARY_MAX_MS = 10_000;
 
 /**
  * Opt-in (COOP_PERF_LOG=1), off by default: periodic plain-text summaries of
@@ -61,6 +64,44 @@ function cleanName(raw: unknown, fallback: string): string {
   return s || fallback;
 }
 
+/**
+ * Maps FightSession.applyAction/forceFlee's human-readable error strings to a
+ * small, stable set of log reason codes — never the raw string, so a future
+ * wording change to those messages can't silently change what a log's
+ * `reason` field says, and so a reason never echoes arbitrary request
+ * content back out.
+ */
+function reasonCodeFor(error: string | undefined): string {
+  switch (error) {
+    case "this fight has already ended":
+    case "already ended":
+      return "already_ended";
+    case "you're not in this fight":
+    case "not an active member":
+      return "not_a_member";
+    case "you're down: you can't act this fight":
+      return "downed";
+    case "you already left this fight":
+      return "fled";
+    case "stale or repeated action":
+      return "stale_seq";
+    case "already readied up this round":
+    case "already readied up: can't play more cards":
+      return "already_ready";
+    case "that card isn't in your hand (already played, or stale)":
+      return "card_not_in_hand";
+    case "not enough energy":
+      return "insufficient_energy";
+    case "this card needs a target":
+    case "invalid or already-downed target":
+      return "invalid_target";
+    case "unknown action":
+      return "malformed";
+    default:
+      return "rejected";
+  }
+}
+
 interface PersistedRoom {
   players: { id: string; x: number; y: number; hp: number }[];
   enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number; phase: number; alive: boolean }[];
@@ -91,6 +132,9 @@ export class CoopServer {
   private pendingFinishes = new Map<string, { room: CoopRoom; fightId: string; session: FightSession; initialMembers: string[] }>();
   /** keyed by `${roomCode}:${playerId}`: a running reconnect-window countdown for someone who disconnected mid-fight. */
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** keyed by `${roomCode}:${playerId}`: an in-progress movement spell for the move-summary log line — see flushMoveSummary. */
+  private moveSummaries = new Map<string, { startedAt: number; sampleCount: number; lastDx: number; lastDy: number; flushTimer: ReturnType<typeof setTimeout> }>();
+  private logger: LogSink;
   private timer: ReturnType<typeof setInterval>;
   private tickDurations = new RollingStats();
   private persistDurations = new RollingStats();
@@ -98,9 +142,16 @@ export class CoopServer {
   private perfTimer?: ReturnType<typeof setInterval>;
   private lagProbeTimer?: ReturnType<typeof setInterval>;
 
-  /** `store`, when given, replaces the real SQLite-backed one — used only by tests that need to inject a store wrapper (e.g. to force `finishFight` to fail on demand) without duplicating this class's wiring. */
-  constructor(dataDir: string, store?: CoopStore) {
+  /**
+   * `store`, when given, replaces the real SQLite-backed one — used only by
+   * tests that need to inject a store wrapper (e.g. to force `finishFight`
+   * to fail on demand) without duplicating this class's wiring. `logger`,
+   * when given, replaces the real stdout sink the same way, for a test that
+   * needs to assert on exact emitted log events.
+   */
+  constructor(dataDir: string, store?: CoopStore, logger?: LogSink) {
     this.store = store ?? openCoopStore(dataDir);
+    this.logger = logger ?? stdoutSink();
     this.timer = setInterval(() => this.tickAll(), TICK_MS).unref();
     if (PERF_LOG) {
       let lastProbe = Date.now();
@@ -235,13 +286,17 @@ export class CoopServer {
       const room = this.getOrLoadRoom(code)!;
       room.addPlayer(playerId, name, color, now);
       json(res, 200, { code, name, color });
+      this.logger.log({ event: "coop.room.create", ts: now, identityNs: "coop", actorId: playerId, actorName: name, roomId: code, result: "ok" });
       return true;
     }
 
     const joinMatch = path.match(/^\/api\/coop\/rooms\/([A-Z0-9]{6})\/join$/);
     if (joinMatch && req.method === "POST") {
       const code = joinMatch[1];
-      if (!this.store.roomExists(code)) throw new HttpError(404, "no such room: check the code or link");
+      if (!this.store.roomExists(code)) {
+        this.logger.log({ event: "coop.room.join", ts: Date.now(), roomId: code, result: "rejected", reason: "no_such_room" });
+        throw new HttpError(404, "no such room: check the code or link");
+      }
       const playerId = this.identityFor(req, res);
       const body = (await readBody(req)) as { name?: unknown };
       const now = Date.now();
@@ -258,6 +313,7 @@ export class CoopServer {
         color,
         members: this.store.members(code).map((m) => ({ id: m.playerId, name: m.name, color: m.color })),
       });
+      this.logger.log({ event: "coop.room.join", ts: now, identityNs: "coop", actorId: playerId, actorName: name, roomId: code, result: "ok" });
       return true;
     }
 
@@ -269,7 +325,9 @@ export class CoopServer {
     const peekMatch = path.match(/^\/api\/coop\/rooms\/([A-Z0-9]{6})$/);
     if (peekMatch && req.method === "GET") {
       const code = peekMatch[1];
-      if (!this.store.roomExists(code)) throw new HttpError(404, "no such room: check the code or link");
+      const exists = this.store.roomExists(code);
+      this.logger.log({ event: "coop.room.peek", ts: Date.now(), roomId: code, result: exists ? "ok" : "rejected", reason: exists ? undefined : "no_such_room" });
+      if (!exists) throw new HttpError(404, "no such room: check the code or link");
       json(res, 200, { code, memberCount: this.store.members(code).length });
       return true;
     }
@@ -284,17 +342,19 @@ export class CoopServer {
     server.on("upgrade", (req: IncomingMessage, socket: Socket, head: Buffer) => {
       const url = new URL(req.url ?? "", "http://local");
       if (url.pathname !== "/coop/ws") return; // not ours: leave it for anything else that might attach later
+      const code = url.searchParams.get("code") ?? "";
       let playerId: string;
       try {
         playerId = this.identityFor(req);
       } catch {
+        this.logger.log({ event: "coop.ws.connect", ts: Date.now(), roomId: code, result: "rejected", reason: "no_identity" });
         socket.destroy();
         return;
       }
-      const code = url.searchParams.get("code") ?? "";
       const room = this.getOrLoadRoom(code);
       const member = room?.players.get(playerId);
       if (!room || !member) {
+        this.logger.log({ event: "coop.ws.connect", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: code, result: "rejected", reason: "not_a_member" });
         socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
         socket.destroy();
         return;
@@ -312,7 +372,13 @@ export class CoopServer {
     if (!set) this.sockets.set(room.code, (set = new Set()));
     // the same identity opening a second tab replaces the stale socket; it never
     // gets a second character in the room.
-    for (const other of set) if (other.playerId === playerId && other.ws !== ws) other.ws.close(4000, "replaced by another tab");
+    let replaced = false;
+    for (const other of set) {
+      if (other.playerId === playerId && other.ws !== ws) {
+        other.ws.close(4000, "replaced by another tab");
+        replaced = true;
+      }
+    }
     set.add(entry);
     // This connection is now the current one for this player; a later close of
     // an older, already-replaced socket (whose close event can still arrive
@@ -320,6 +386,12 @@ export class CoopServer {
     const genKey = `${room.code}:${playerId}`;
     const myGen = (this.connGen.get(genKey) ?? 0) + 1;
     this.connGen.set(genKey, myGen);
+
+    const memberName = room.players.get(playerId)?.name;
+    this.logger.log({
+      event: replaced ? "coop.ws.replace" : "coop.ws.connect",
+      ts: now, identityNs: "coop", actorId: playerId, actorName: memberName, roomId: room.code, connId: String(myGen), result: "ok",
+    });
 
     const hello: CoopHelloMsg = {
       type: "hello",
@@ -352,6 +424,7 @@ export class CoopServer {
         const dx = Math.max(-1, Math.min(1, m.dx));
         const dy = Math.max(-1, Math.min(1, m.dy));
         room.setIntent(playerId, dx, dy, Date.now());
+        this.trackMovement(room.code, playerId, dx, dy);
         return;
       }
       if ((m.type === "playCard" || m.type === "endTurn" || m.type === "flee") && typeof m.seq === "number") {
@@ -373,9 +446,55 @@ export class CoopServer {
       room.setOnline(playerId, false, Date.now());
       if (set!.size === 0) this.sockets.delete(room.code);
       if (room.players.get(playerId)?.fightId) this.armReconnectTimer(room, playerId);
+      this.logger.log({ event: "coop.ws.disconnect", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, connId: String(myGen), result: "ok" });
     };
     ws.on("close", onClose);
     ws.on("error", onClose);
+  }
+
+  /**
+   * One `coop.move.summary` line per movement spell, never once per raw
+   * `move` message (the client can send several a second, independent of
+   * the 150ms tick) and never a position trail. A spell flushes when
+   * movement intent returns to zero, or after MOVE_SUMMARY_MAX_MS while
+   * still moving, whichever comes first — so a player who never stops still
+   * produces periodic evidence, not silence.
+   */
+  private trackMovement(roomCode: string, playerId: string, dx: number, dy: number) {
+    const key = sessionKey(roomCode, playerId);
+    const stopped = dx === 0 && dy === 0;
+    const existing = this.moveSummaries.get(key);
+    if (stopped) {
+      if (existing) {
+        clearTimeout(existing.flushTimer);
+        this.moveSummaries.delete(key);
+        this.flushMoveSummary(roomCode, playerId, existing);
+      }
+      return;
+    }
+    if (existing) {
+      existing.sampleCount++;
+      existing.lastDx = dx;
+      existing.lastDy = dy;
+      return;
+    }
+    const entry = {
+      startedAt: Date.now(), sampleCount: 1, lastDx: dx, lastDy: dy,
+      flushTimer: setTimeout(() => {
+        const e = this.moveSummaries.get(key);
+        if (!e) return;
+        this.moveSummaries.delete(key);
+        this.flushMoveSummary(roomCode, playerId, e);
+      }, MOVE_SUMMARY_MAX_MS).unref(),
+    };
+    this.moveSummaries.set(key, entry);
+  }
+
+  private flushMoveSummary(roomCode: string, playerId: string, e: { startedAt: number; sampleCount: number; lastDx: number; lastDy: number }) {
+    this.logger.log({
+      event: "coop.move.summary", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: roomCode, result: "ok",
+      summary: { durationMs: Date.now() - e.startedAt, sampleCount: e.sampleCount, lastDx: e.lastDx, lastDy: e.lastDy },
+    });
   }
 
   /** Mid-fight disconnect: give them RECONNECT_WINDOW_MS to come back before it resolves as a normal, costed flee. */
@@ -394,6 +513,7 @@ export class CoopServer {
         if (!session) return;
         const initialMembers = session.initialPlayerIds;
         session.forceFlee(playerId, Date.now() / 1000, Math.random);
+        this.logger.log({ event: "coop.fight.flee", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, result: "ok", summary: { forced: true } });
         this.afterFightChange(room, fightId, session, initialMembers);
       }, RECONNECT_WINDOW_MS).unref(),
     );
@@ -410,9 +530,15 @@ export class CoopServer {
 
   private handleFightAction(room: CoopRoom, playerId: string, seq: number, raw: { type: string } & Record<string, unknown>) {
     const fightId = room.players.get(playerId)?.fightId;
-    if (!fightId) return this.sendTo(room, playerId, { type: "actionError", error: "you're not in a fight right now" });
+    if (!fightId) {
+      this.logger.log({ event: "coop.action.rejected", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, seq, result: "rejected", reason: "not_in_fight" });
+      return this.sendTo(room, playerId, { type: "actionError", error: "you're not in a fight right now" });
+    }
     const session = this.sessions.get(sessionKey(room.code, fightId));
-    if (!session) return this.sendTo(room, playerId, { type: "actionError", error: "that fight no longer exists" });
+    if (!session) {
+      this.logger.log({ event: "coop.action.rejected", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, seq, result: "rejected", reason: "fight_not_found" });
+      return this.sendTo(room, playerId, { type: "actionError", error: "that fight no longer exists" });
+    }
 
     let action: FightAction;
     if (raw.type === "playCard" && typeof raw.cardInstanceId === "string") {
@@ -422,12 +548,17 @@ export class CoopServer {
     } else if (raw.type === "flee") {
       action = { type: "flee" };
     } else {
+      this.logger.log({ event: "coop.action.rejected", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, seq, result: "rejected", reason: "malformed" });
       return this.sendTo(room, playerId, { type: "actionError", error: "malformed action" });
     }
 
     const initialMembers = session.initialPlayerIds;
     const result = session.applyAction(playerId, seq, action, Date.now() / 1000, Math.random);
     if (!result.ok) {
+      this.logger.log({
+        event: "coop.action.rejected", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, seq,
+        result: "rejected", reason: reasonCodeFor(result.error),
+      });
       this.sendTo(room, playerId, { type: "actionError", error: result.error ?? "rejected" });
       // a stale/duplicate seq or an action against state that already moved on: push the
       // authoritative view back so the client self-heals instead of the player needing to
@@ -436,6 +567,14 @@ export class CoopServer {
       const hand = session.handView(playerId);
       if (hand) this.sendTo(room, playerId, hand);
       return;
+    }
+    const logEvent = action.type === "playCard" ? "coop.fight.card" : action.type === "endTurn" ? "coop.fight.endTurn" : "coop.fight.flee";
+    this.logger.log({
+      event: logEvent, ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, seq, result: "ok",
+      summary: action.type === "playCard" ? { targetKey: action.targetKey ?? null } : undefined,
+    });
+    for (const downedId of session.takeJustDowned()) {
+      this.logger.log({ event: "coop.fight.downed", ts: Date.now(), identityNs: "coop", roomId: room.code, fightId, targetId: downedId, result: "ok" });
     }
     this.afterFightChange(room, fightId, session, initialMembers);
   }
@@ -490,10 +629,12 @@ export class CoopServer {
   private tryFinishFight(room: CoopRoom, fightId: string, session: FightSession, initialMembers: string[]): boolean {
     const now = Date.now();
     const roomStateJson = JSON.stringify(persist(room));
+    const wasPending = this.pendingFinishes.has(sessionKey(room.code, fightId));
     try {
       this.store.finishFight(room.code, fightId, roomStateJson, now);
     } catch (e) {
       console.error(`[coop] finishFight failed for ${room.code}:${fightId}, will retry next tick:`, e);
+      this.logger.log({ event: "coop.fight.ended", ts: now, roomId: room.code, fightId, result: "error", reason: "finish_commit_failed" });
       return false;
     }
     this.lastSaved.set(room.code, now);
@@ -508,6 +649,10 @@ export class CoopServer {
     for (const pid of session.finalPlayerIds ?? initialMembers) this.sendTo(room, pid, ended);
     this.sessions.delete(sessionKey(room.code, fightId));
     this.pendingFinishes.delete(sessionKey(room.code, fightId));
+    this.logger.log({
+      event: "coop.fight.ended", ts: now, roomId: room.code, fightId, result: "ok",
+      summary: { outcome: session.ended!, finalMemberIds: (session.finalPlayerIds ?? initialMembers).join(","), committedAfterRetries: wasPending },
+    });
     return true;
   }
 
@@ -589,6 +734,10 @@ export class CoopServer {
           const hand = session.handView(pid);
           if (hand) this.sendTo(room, pid, hand);
         }
+        this.logger.log({
+          event: "coop.encounter.formed", ts: now, roomId: code, fightId: rf.id, result: "ok",
+          summary: { memberIds: rf.playerIds.join(","), enemyKeys: rf.enemyKeys.join(",") },
+        });
         // persist the freshly-dealt opening state immediately: a crash before anyone's
         // first action must still resume this fight, not drop it.
         this.persistFight(code, session);

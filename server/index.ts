@@ -5,6 +5,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { checkProgression, MAX_SAVE_BYTES, newRun, validateSave, type SaveData } from "../src/save.ts";
 import { attachCoop } from "./coop/ws.ts";
 import { HttpError, json, parseCookies, readBody } from "./http.ts";
+import { stdoutSink } from "./log.ts";
 import { renderReadme } from "./readme.ts";
 import { openStore } from "./store.ts";
 
@@ -23,6 +24,7 @@ const COOKIE = "cc_visitor";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 
 const store = openStore(DATA_DIR);
+const log = stdoutSink();
 
 // ---------- helpers ----------
 
@@ -71,16 +73,27 @@ async function api(req: IncomingMessage, res: ServerResponse, path: string) {
     const base = intField(body, "baseRevision");
     if (JSON.stringify(body.save ?? null).length > MAX_SAVE_BYTES) throw new HttpError(413, "save too large");
     const v = validateSave(body.save);
-    if (!v.ok) return json(res, 400, { error: v.error });
+    if (!v.ok) {
+      log.log({ event: "save.put.invalid", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "rejected", reason: "invalid_save" });
+      return json(res, 400, { error: v.error });
+    }
     const cur = store.getSave(visitor);
     if ((cur?.revision ?? 0) !== base) {
+      log.log({ event: "save.put.conflict", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "rejected", reason: "stale_revision" });
       return json(res, 409, { error: "your progress changed elsewhere (another tab?)", ...savePayload(visitor) });
     }
     if (!cur) return json(res, 409, { error: "no run to save into: start a run first", ...savePayload(visitor) });
     const problem = checkProgression(cur.save, v.save);
-    if (problem) return json(res, 422, { error: problem });
+    if (problem) {
+      log.log({ event: "save.put.invalid", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "rejected", reason: "progression" });
+      return json(res, 422, { error: problem });
+    }
     const revision = store.putSave(visitor, base, v.save);
-    if (revision === null) return json(res, 409, { error: "conflict", ...savePayload(visitor) });
+    if (revision === null) {
+      log.log({ event: "save.put.conflict", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "rejected", reason: "conflict" });
+      return json(res, 409, { error: "conflict", ...savePayload(visitor) });
+    }
+    log.log({ event: "save.put.ok", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "ok", summary: { revision } });
     return json(res, 200, { revision, savedAt: v.save.savedAt });
   }
 
@@ -96,6 +109,7 @@ async function api(req: IncomingMessage, res: ServerResponse, path: string) {
     const ended = prev ? (prev.outcome === "playing" ? "abandoned" : prev.outcome) : "";
     const revision = store.archiveAndReplace(visitor, base, next, ended);
     if (revision === null) return json(res, 409, { error: "your progress changed elsewhere", ...savePayload(visitor) });
+    log.log({ event: "save.run.start", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "ok", summary: { runNumber: next.runNumber } });
     return json(res, 200, savePayload(visitor));
   }
 
@@ -104,6 +118,7 @@ async function api(req: IncomingMessage, res: ServerResponse, path: string) {
     const body = (await readBody(req)) as { confirm?: unknown };
     if (body?.confirm !== "erase") throw new HttpError(400, 'send {"confirm":"erase"} to delete your save and history');
     store.erase(visitor);
+    log.log({ event: "save.erase", ts: Date.now(), identityNs: "visitor", actorId: visitor, result: "ok" });
     return json(res, 200, savePayload(visitor));
   }
 
