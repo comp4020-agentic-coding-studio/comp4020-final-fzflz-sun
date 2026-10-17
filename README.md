@@ -79,6 +79,22 @@ first guess, not a tested one.
 
 Not built yet: accounts, loot, talents, art.
 
+<!-- DRAFT (crit 10, awaiting author confirmation): identity/sharing wording
+     below is a first pass, not final. -->
+**Who's who (new, crit 10).** You and a friend are told apart by your
+browser, not an account — joining from the same browser again (even after
+closing the tab) picks up right where you left off, while a different
+browser, or the same one with its cookies cleared, is a new, separate
+person with no way back to the old one by typing in the same name again.
+Anyone who creates an expedition can hand it to a friend with one invite
+link; share it the way you'd share any link. Inside the expedition, you can
+all see each other's position, name and the shared map and fight state —
+but your own hand, and what you're about to play, stays yours alone until
+you play it. *Enforced:* `spec/coop-auth.test.ts`,
+`server/coop/ws.test.ts`, `tools/coop-log-check.mjs`. *Not yet judged by
+play:* a real two-person session, narrated live from the server's own logs
+rather than by looking at the screens.
+
 ## Where these ideas came from
 
 **My playtests.** v1 let me move during combat, and it felt like an action

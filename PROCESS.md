@@ -241,3 +241,89 @@ extended with a card-id-collision scenario across two concurrently
 restored rooms. As with round 3, this is agent-run verification against
 real browsers, real WebSocket clients and a real restarted process — not
 a claim that a human has played any of it yet.
+
+## Crit 10: identity, permissions and server-side logging
+
+C10's theme, "two people your app tells apart, read from its logs," asks
+for three things: a documented identity model, a documented and
+server-enforced permission boundary, and durable server-side logging of
+who-did-what, surviving the crit session. A source review of
+`server/coop/ws.ts`, `server/index.ts`, `server/coop/room.ts` and
+`server/coop/fight-session.ts` — reading the current code directly, not
+assuming the prior rounds' own "server is authoritative" claims still
+held in every corner — found the identity and authorization mechanics
+already correct, carried over unmodified from ADR 0002 (anonymous
+visitors) and ADR 0005 (co-op multiplayer): both `cc_visitor` and
+`cc_coop` are server-derived from a hashed cookie, never a client-
+suppliable field; every fight action's acting player comes from the
+server-resolved connection; card ownership and private views are already
+correctly scoped. What was actually missing: the room "peek" endpoint
+returned the full member list to an unauthenticated prober who merely
+knew the room code; no structured business logging existed anywhere
+(only an opt-in, default-off performance log); and no automated check
+proved the authorization boundaries the brief cares about — they were
+true by code reading, not by a passing test.
+
+[`928d546`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/928d546)
+adds [ADR 0007](docs/adr/0007-coop-identity-and-permissions.md), shrinks
+the peek endpoint to `{code, memberCount}`, and adds
+`spec/coop-auth.test.ts` proving the boundaries directly over real
+HTTP/WebSocket connections: distinct identities for the same display
+name, identity surviving reconnect, a non-member unable to open a room's
+socket, a forged player id or stolen card instance id never affecting
+another player's state, a player never receiving another's hand, and a
+rejected action never disturbing the legitimate player's next real
+action.
+[`b769e3f`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/b769e3f)
+adds a new, purely additive `server/log.ts`: a pure JSON-line formatter
+plus an injectable sink, unit-tested (`server/log.test.ts`) for exact
+output shape and — reusing the same crafted-payload discipline as round
+4's XSS fix — proving a display name shaped like an HTML payload,
+embedded newlines/quotes, or a fake adjacent log-line fragment can never
+break line-based parsing or forge a second event.
+[`8db22eb`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/8db22eb)
+wires it into every real action and rejection in `server/coop/ws.ts`
+(room create/join/peek, connect/replace/disconnect, throttled movement
+summaries — one line per movement spell, never per 150ms tick — encounter
+formation, every fight action and every rejection mapped to a small fixed
+reason code, a player going down, fight conclusion) and into
+`server/index.ts`'s save API, and
+[`43d501c`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/43d501c)
+extends `server/coop/ws.test.ts` with exact log-content assertions
+against a capturing sink — distinct actor ids for distinct identities, a
+stable reason code per rejection scenario, never the attempted content in
+a rejection line, a crafted name producing exactly one valid JSON line
+through the real call site.
+
+[`d1c28ba`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/d1c28ba)
+adds `tools/coop-log-check.mjs`, which spawns a real `server/index.ts`
+process — the only way to prove its own logging fires, since it has no
+constructor to inject a test sink into the way `CoopServer` does — and
+drives two real identities through a real action/rejection/flee/
+reconnect sequence plus a solo save write, then asserts the server's own
+captured stdout contains every required event type with two distinct
+actor ids and no raw cookie value or stolen card content anywhere in it.
+The same commit wires it, and round 4's already-built but never-wired-in
+`tools/coop-xss-check.mjs`, into CI.
+[`c4e6e42`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c4e6e42)
+adds `tools/coop-identity-demo-check.mjs`, a real two-Chrome-profile
+check standing in for the live demo: an invite-link-only join, a shared
+fight, independent card plays, a flee, and a reconnect on the same
+profile. Finding and fixing this tool's own bugs was itself real
+evidence of this round's standard: a fixed keyboard heading geometrically
+missed the target enemy's actual spawn (replaced with live steering), and
+a plain process kill raced Chrome's own cookie-database flush to disk,
+making a reopened profile see a different identity even with the profile
+directory intact — fixed by asking Chrome to shut down cleanly before
+killing it, confirmed directly by comparing the raw cookie token across a
+close/reopen cycle, not assumed from the profile directory surviving.
+
+In outline, everything above plus
+[`59b6dbd`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/59b6dbd)
+brought `pnpm check` (typecheck plus the full spec/unit suite) to 444
+tests passing against a running dev server, all green, repeatedly. As
+with every prior round, this is agent-run verification against real
+HTTP/WebSocket connections, a real spawned process and real headless
+Chrome — not a claim that a real human two-person demo, narrated live
+from `flyctl logs` against the deployed app, has happened yet. That
+remains the explicit next step before the crit itself.
