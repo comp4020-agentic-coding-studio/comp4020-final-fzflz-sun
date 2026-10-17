@@ -136,3 +136,108 @@ post-fix author review or independent player session is recorded.
 Next: close the recovery windows, make the critical multiplayer
 reproductions durable checks, and test real-network play before extending
 loot and character progression.
+
+## Round 3: a further restart-recovery review, the same day
+
+The recovery windows named above were closed the same day they were
+written up, not left for a later crit. [`b2896df`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/b2896df)
+fixed the two gaps the 11 October review had already found (player HP
+living outside the per-action fight snapshot; restoration clearing ready
+status). A further, more careful pass over the same restart path — by the
+same review process, reading the current source again rather than
+trusting the prior "resumes exactly" claim — found four more real gaps,
+all specifically in restart/recovery: no legacy-format compatibility for
+a fight row written before `b2896df` added `hp`/`ready`; a fight-id
+collision after a restart (`CoopRoom.nextFightN` never advanced past a
+restored fight's id); a fled player re-locked into the fight they'd
+already left (the restore loop used the fight's original fixed roster
+instead of its actual current membership); and fight-end persistence that
+wasn't atomic and notified clients before either write committed.
+[`3f0335c`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/3f0335c)
+fixed all four, each backed by a real `docker restart` reproduction, not
+a same-process call. [`c4cf206`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c4cf206)
+turned the directly-relevant `.local/`-only scripts into real,
+repo-committed tools — `tools/coop-live-check.mjs` (CI-wired, no restart
+needed) and `tools/coop-restart-check.sh` (real `docker restart` on a
+named volume, local/pre-release only, mirroring
+`tools/persistence-check.sh`'s own convention) — and added a co-op
+section to `docs/process/playtest.md`. The [round-3 stage card](docs/process/2026-10-11-coop-restart-hardening.md)
+records the acceptance scenarios and review evidence for all four; a test
+assumption in that round's own fled-player check turned out to be wrong
+(it expected the fight view's player list to shrink, when showing a fled
+member with `fled: true` is correct, pre-existing behavior) — corrected
+in the check, not the product, and recorded in that card's correction
+table. This round deployed as [`1b0b10d`](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/1b0b10d),
+with 409 tests passing and CI green; the real human two-player playtest
+remained, and remains, outstanding.
+
+## Round 4: a fourth independent review, no new symptom report
+
+Every check from rounds 2 and 3 stayed green with nothing new reported
+from play. The same review discipline was applied again anyway — reading
+the current source directly rather than treating passing checks as proof
+there was nothing left — and found four further real issues, none caught
+by the 409 unit tests or the round-3 live/restart checks:
+
+- **A room member's display name could execute as markup.**
+  `src/coop-main.ts`'s `renderFight()` built an enemy button's "→ target
+  name" text via `innerHTML`, with the name interpolated raw; the
+  server's `cleanName()` only trims and truncates, never escapes. Fixed
+  with a new, shared `escapeHtml()` in `src/coop-protocol.ts` (no reusable
+  escaping helper existed before this — `src/main.ts` and
+  `server/readme.ts` each had their own private copy), applied at the one
+  real sink. No character blacklist was added; a normal Chinese/space/
+  punctuation name still passes through unchanged.
+- **A stale `fightEnded` could wipe an unrelated, newer fight's UI.** The
+  server notified a fight's *original* roster when it concluded, not its
+  actual final membership, so a player who'd fled that fight earlier and
+  since joined a different one could still receive its `fightEnded` —
+  and the client applied it unconditionally, with no check that the
+  message was even about the fight on screen. Fixed on both ends:
+  `FightSession` now captures `finalPlayerIds` at the exact moment
+  `finish()` runs, before anything clears membership, so the server
+  notifies the right people; the client now checks `msg.fightId` against
+  its own current fight before acting on `fightEnded` or `leftFight`. A
+  compounding reconnect gap — a fight concluding entirely while a client
+  was disconnected left nothing to tell that client so on reconnect — was
+  closed by adding the player's current `fightId` to the `hello` message.
+- **A card-instance-id could collide after a restart.** The card-id
+  counter is a single process-wide counter with no reservation mechanism,
+  unlike the existing `reserveFightId()` for fight ids. Fixed with an
+  analogous `reserveCardId()`, called for every id in every restored
+  hand.
+- **A failed database commit at fight-end still reported success.** The
+  existing retry loop's success flag only gated the save-debounce
+  timestamp; the `fightEnded` broadcast and in-memory session deletion
+  both ran regardless of whether the commit actually happened, with
+  nothing to retry it later. Fixed with a `pendingFinishes` map: a failed
+  commit is retried every tick until it succeeds, nobody is notified and
+  no session is discarded until it actually commits, and the affected
+  room's own periodic snapshot write is skipped while a finish is
+  pending.
+
+This round's own review of the existing checks found them not just
+improvable but concretely wrong in places: `tools/coop-live-check.mjs`
+never sent a single `playCard` in any scenario (asserting "independent
+card play" by scenario name only); its round-advance check was a loose
+OR, not an exact count of enemy actions; its reconnect scenario never
+asserted a real nonzero prior `lastSeq`, only its type.
+`tools/coop-restart-check.mjs`'s victory-restart check would have passed
+vacuously if zero `state` messages ever arrived. All four were
+strengthened as part of this round, not left noted for later.
+
+The [round-4 stage card](docs/process/2026-10-15-coop-reliability-round4.md)
+records the full acceptance scenarios, review evidence and correction
+table. In outline: `pnpm typecheck` and `pnpm test:unit` (408 tests
+passing, including new tests for `finalPlayerIds`, `reserveCardId`, and a
+fault-injection suite in `server/coop/ws.test.ts` forcing `finishFight`
+to fail); a real headless-Chrome run (`tools/coop-xss-check.mjs`, new)
+confirming a crafted name never executes and a normal Chinese/space name
+still displays correctly; `tools/coop-live-check.mjs` extended with two
+new scenarios reproducing the exact stale-message repro and the
+disconnect-while-concluding-elsewhere reconnect case, both passing
+repeatedly across multiple stability reruns; `tools/coop-restart-check.sh`
+extended with a card-id-collision scenario across two concurrently
+restored rooms. As with round 3, this is agent-run verification against
+real browsers, real WebSocket clients and a real restarted process — not
+a claim that a human has played any of it yet.

@@ -182,3 +182,73 @@ since CI's own container can't actually test a restart — it uses
 `tools/coop-live-check.mjs`, wired into CI. Not verified: a real human
 two-player session; a real Fly-level restart (only the local production
 image has been restart-tested).
+
+## Further hardening addendum, 2026-10-15
+
+A fourth independent review of the current source (not prompted by a new
+symptom report — the prior rounds' own checks all stayed green) found four
+more real issues, none caught by the 408 unit tests or the round-3 live/
+restart checks at the time:
+
+- **Nickname XSS.** `src/coop-main.ts`'s `renderFight()` builds an enemy
+  button's "→ &lt;target name&gt;" text via `innerHTML`, interpolating a
+  room member's display name — attacker-controlled, since the server's
+  `cleanName()` only trims/truncates, never strips HTML — raw into the
+  template string. A crafted name like `<svg/onload=...>` would execute in
+  any client viewing a fight where that player is targeted. Fixed with a
+  new exported `escapeHtml()` in `src/coop-protocol.ts` (shared by both
+  sides of co-op, rather than a third private copy alongside `src/main.ts`'s
+  and `server/readme.ts`'s existing ones), applied at the one real sink.
+- **A stale `fightEnded` could wipe an unrelated new fight's UI.** The
+  server notified a fight's *original* roster when it concluded, not its
+  actual final membership — a player who'd fled fight X earlier and since
+  joined unrelated fight Y could still receive X's `fightEnded`, and the
+  client applied every `fightEnded`/`leftFight` unconditionally, with no
+  check that the message was even about the fight currently on screen.
+  Fixed on both ends: `FightSession` now captures `finalPlayerIds` at the
+  exact moment `finish()` runs (before anything clears membership or
+  `RoomPlayer.fightId`) for the server to notify correctly, and the client
+  now checks `msg.fightId` against its own `currentFight.fightId` before
+  acting on either message — reusing the same match pattern the formation
+  cache already used. A compounding reconnect gap was also closed: if a
+  fight concluded entirely while a client was disconnected, there was no
+  message left to send it at all (the fight's gone, so there's no catch-up
+  `fight`/`fightEnded`/`leftFight` to send) — `CoopHelloMsg` now carries the
+  player's current `fightId`, so the client's own `hello` handler clears any
+  stale in-memory fight-dock state when the server reports none.
+- **Card-instance-ID collision after a restart.** The card-id counter
+  (`server/coop/fight-session.ts`) is a single process-wide counter with no
+  reservation mechanism analogous to the existing `reserveFightId()` for
+  fight ids — a restart's restored hand could collide with a freshly-minted
+  id afterward, and `playCard`'s `indexOf` lookup would silently resolve to
+  the wrong card. Fixed with `reserveCardId()`, called for every id in every
+  restored player's `handIds`, mirroring `reserveFightId()` exactly.
+- **A failed `finishFight` commit still reported success.** The existing
+  retry loop's `committed` flag only gated the save-debounce timestamp — the
+  `fightEnded` broadcast and in-memory session deletion both ran
+  unconditionally even if the database commit never happened, with no way
+  to retry later; the room's own separate periodic snapshot write could
+  then persist the fight as already-concluded while the `fights` table
+  still held the stale row. Fixed with a `pendingFinishes` map: a failed
+  commit is retried every tick until it succeeds (or the fault clears),
+  nobody is notified and no session is discarded until it actually commits,
+  and the affected room's own periodic snapshot write is skipped while a
+  finish is pending for it.
+
+**Verification**: a real headless-Chrome run (`tools/coop-xss-check.mjs`)
+confirms a crafted name never executes and renders as literal text,
+including as an attack-intent target, while a normal Chinese/space name
+still displays correctly. Real two-client WebSocket scenarios
+(`tools/coop-live-check.mjs`, extended) reproduce the exact stale-message
+repro (flee into a new fight, old one concludes elsewhere — new fight
+untouched) and the disconnect-while-fight-concludes-elsewhere reconnect
+case. A real cross-process restart with two concurrently-restored rooms
+(`tools/coop-restart-check.sh`, extended) confirms restored card ids are
+exact and a freshly-drawn one afterward collides with neither room's ids.
+A fault-injection integration test (`server/coop/ws.test.ts`, new) forces
+`finishFight` to fail twice, confirms no false notification and no session
+loss, confirms the room's periodic snapshot doesn't diverge while pending,
+then confirms a later successful retry commits and notifies exactly once.
+409 unit tests (several new) plus the full existing regression set all
+stayed green throughout. Not verified: a real human two-player session; a
+real Fly-level restart.
