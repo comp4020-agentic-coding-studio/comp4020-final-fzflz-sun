@@ -222,6 +222,36 @@ by URL alone."
   geometrically missing a spawn by design). Not fixed as part of this
   round, since it's orthogonal to C10's own scope; worth a future pass
   reusing this round's live-steering fix from `coop-identity-demo-check.mjs`.
+- **2026-10-17, agent, independent re-verification after this card's own
+  commit** (`4d00ee7`), fresh container from the already-built `app:latest`
+  image: `verify-deploy`'s own `sourceRevision` field confirmed the image
+  was built from `4d00ee7` exactly with `worktreeDirty: false`, so this run
+  verifies the actual committed state, not a stale build. `APP_URL=...
+  pnpm check` 444/444; `pnpm check:browser` full pass; `pnpm check:deploy
+  -- ...` `{"ok": true, ...}`; `node tools/coop-live-check.mjs <url>` 5/5
+  scenarios in one run (no flake this time); `node tools/coop-xss-check.mjs
+  <url>` run 3x back-to-back against the same container: 1 fail / 2 pass,
+  the failure being exactly the documented "both players enter a shared
+  fight" step — consistent with the ~1-in-3 pre-existing rate recorded
+  above, not a new or worse symptom; `node tools/coop-log-check.mjs <url>`
+  passed in base-URL mode; `node tools/coop-identity-demo-check.mjs <url>`
+  passed in full, including the reconnect-same-profile step; a direct
+  `vitest run spec/coop-auth.test.ts` against this container passed all 10
+  tests standalone (not just as part of the `pnpm check` bundle above).
+  `docker logs` on this container, filtered to one event-type-per-line,
+  showed all required event types firing with real counts across the
+  session (`coop.room.create` x25, `coop.room.join` x16, `coop.room.peek`
+  x2, `coop.ws.connect` x39, `coop.ws.disconnect` x38, `coop.ws.replace`
+  x1, `coop.encounter.formed` x13, `coop.fight.card` x11, `coop.fight.flee`
+  x17, `coop.fight.ended` x11, `coop.action.rejected` x33,
+  `coop.move.summary` x33, `save.run.start` x13, `save.put.ok` x11,
+  `save.put.conflict` x1, `save.put.invalid` x2, `save.erase` x3) — and the
+  two-Chrome-profile demo check's own room code was directly traceable in
+  this output with two distinct, stable `actorId`s across
+  `coop.room.create` → `coop.room.join` → `coop.ws.connect` →
+  `coop.encounter.formed` → `coop.fight.card` → `coop.fight.ended`, exactly
+  the narration sequence the demo notes below describe. Container removed
+  after the sweep; no state left running.
 - **Not run as part of this round**: a real Fly deploy, and `flyctl logs`
   exercised against it — both require an actual deploy, which is pending
   the user's go-ahead (see Deployment below).
