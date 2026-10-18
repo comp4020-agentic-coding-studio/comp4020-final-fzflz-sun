@@ -1,11 +1,31 @@
 # Stage card: C10 follow-up — five reproduced gaps from the 18 October review
 
 Title / date: C10 follow-up fixes, 2026-10-19
-Status: implemented and verified locally (including a fresh production
-Docker image); not yet committed, not yet deployed
+Status: committed in `5291631` through `fea280f`, with local verification
+recorded below (including a fresh production Docker image). Deployment is
+not established by those local results; see the subsequent review below.
 Starting commit: `3fd04f7` (C10's deployed state); the review's own
 documentation-only commit `e0319c7` landed on top of it before this round's
 code work began
+
+## Subsequent Codex review — 19 October
+
+This review distinguishes CC's completed implementation report from full
+acceptance of every edge case. Typechecking and 441 unit tests independently
+passed at `fea280f`. Source review found no P0/P1 blocker to normal pushing,
+but two gaps remain:
+
+- `handleReconnectTimeout` logs `left: result.ok`; `forceFlee` can return
+  success when a flee is only queued, before the player actually leaves.
+- The expedition-ending panel is triggered by `fightEnded(wiped)` but is
+  not reconstructed from the authoritative state after reload or reconnect.
+
+The XSS helper also uses `some(Boolean)` for encounter entry, so that gate
+alone does not establish that both profiles joined the same fight. These
+findings were identified by source review, not independently reproduced in
+a new browser run. They remain open; CC's local passing checks below do not
+prove those cases. CI/deployment and a real two-person demonstration require
+their own evidence.
 
 ## Player problem and evidence
 

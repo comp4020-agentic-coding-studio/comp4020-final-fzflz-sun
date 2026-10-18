@@ -1,6 +1,6 @@
 # Process overview — Crit 10
 
-Updated 18 October 2026 (Australia/Sydney), from repository state 3fd04f7.
+Updated 19 October 2026 (Australia/Sydney), from repository state fea280f.
 Prepared with Codex from recorded requests, commits and verification.
 Personal conclusions remain an author-review draft; automated checks are
 identified separately from human play.
@@ -48,18 +48,13 @@ Claude Code to implement stages. My actual reports concerned an invisible
 multiplayer entrance and choppy movement. Review findings are recorded
 separately from my feedback.
 
-Before accepting a change, the selected checks should exercise the
-player-visible contract. An HTTP test can challenge ownership, a real
-browser can expose text parsing, and a restart check can cover process
-boundaries. I asked for prompts to name those cases explicitly. Stage cards
-retain failed assumptions and corrections, while the overview links the
-decisions that changed the work. This keeps repeated reviews inspectable
-without presenting every passing command as equal evidence. The
-[working process](docs/process/README.md) records that loop.
+I requested explicit scenarios: HTTP for ownership, browsers for text,
+restarts for process boundaries. Stage cards preserve failed assumptions
+and corrections; the [working process](docs/process/README.md) records the loop.
 
 The performance correction
 [ec65456](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/ec65456)
-followed local measurements: rendering averaged 16.67 ms, while displayed
+followed local measurements: frame intervals averaged 16.67 ms, while displayed
 positions changed every 8.78 frames before correction and 1.02 afterward.
 [Preserved samples](docs/process/evidence/coop-perf-baseline.json) and
 [after samples](docs/process/evidence/coop-perf-after-phaseB.json) support
@@ -123,35 +118,54 @@ they are not two classmates judging the experience.
 ## Current evidence and its limits
 
 The [C10 stage card](docs/process/2026-10-17-c10-identity-logging.md)
-records local and production-container checks, including earlier 444-test
-passes and an intermittent XSS-check navigation failure. The current
+records earlier 444-test passes and an intermittent XSS-check navigation
+failure. The earlier
 [workflow 39029743347](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/39029743347)
 successfully checked and deployed
 [3fd04f7](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/3fd04f7).
-This supersedes the card's original pending-deployment status. A verifier's
-sourceRevision and worktreeDirty describe its local checkout; they do not
-fingerprint the tested container.
+That workflow does not verify the subsequent fixes. A verifier's
+sourceRevision and worktreeDirty describe its local checkout, not the tested
+container.
 
-The [18 October review](docs/process/2026-10-18-c10-review.md) records a new
-result: typechecking passed, but checking against the deployed app produced
-443 passes and one failure. A permissions test assumes a random hand contains
-an affordable non-single-target card. That assumption can fail; the result
-does not establish an authorization bypass. The isolated spawned-server
-logging check passed, showing that event presence alone is insufficient.
+The [18 October review](docs/process/2026-10-18-c10-review.md) recorded 443
+passes and one failed random-hand assumption against that deployed build,
+not an authorization bypass. Isolated reproductions found bracketed names
+breaking canvas text, inaccurate logs, rejected cards consuming sequence
+numbers, and zero-HP players moving without a visible continuation.
 
-Review and isolated reproductions also found bracketed nicknames breaking
-Kaplay's text parser, unbounded client target text in logs without the
-executed card's name, and failed forced flee logged as success. Rejected
-cards consume a sequence despite the protocol describing last-accepted
-actions. Wiped players can move with zero HP but have no visible continuation.
-These remain unresolved; the [follow-up prompt](docs/process/2026-10-18-c10-follow-up-prompt.md)
-turns them into explicit acceptance cases.
+Follow-up commits address the five findings' basic paths.
+[5291631](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/5291631)
+escapes canvas names and corrects XSS-check steering.
+[50beb47](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/50beb47)
+supplies server-confirmed card summaries, checks forced-flee results and
+advances sequence numbers only on accepted actions.
+[442a36e](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/442a36e)
+repairs the permissions fixture and waits for new messages.
+[3157699](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/3157699)
+gates zero-HP movement and adds a visible expedition ending with a browser
+check. The [follow-up record](docs/process/2026-10-19-c10-followup-fixes.md),
+committed in
+[fea280f](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/fea280f),
+attributes verification to Claude Code.
+
+That record reports 462 passing tests, deterministic all-single-hand coverage,
+and local production-container checks for browser, save, logging, identity
+and desktop/phone wipe flows. Its repeated XSS checks passed after the
+steering correction. The separate existing live co-op tool passed four of
+five runs; CC attributed the failure to another all-Strike-hand assumption.
+These are recorded local results from before the fixes were committed,
+not checks rerun while updating this overview or proof of their deployment.
+
+Subsequent source review still found queued forced flee logged as already
+left, and an ending panel that is not restored after reload or reconnect.
+The XSS helper also accepts either profile entering combat, rather than
+requiring both. Those gaps remain open; the recorded passing checks do not
+close them.
 
 ## Next judgment
 
-Complete those fixes and stabilize meaningful checks, then rehearse with two
-people from the deployed URL while narrating only from logs. No independent
-human demo, post-fix author play report or Fly log-stream inspection is
-recorded for this review. The [C10 reflection](reflections/crit-10.md) is a
-finished candidate for author review, not an assertion that those observations
-have happened.
+Verify the follow-up's CI and deployment separately, correct these remaining
+contracts and check assumptions, then rehearse with two people while narrating from
+logs. No human demo, post-fix author play report or Fly log-stream inspection
+is recorded here. The [C10 reflection](reflections/crit-10.md) remains a
+candidate for author review, not evidence that those observations happened.
