@@ -168,10 +168,18 @@ export class CoopRoom {
     if (!online) p.dir = { x: 0, y: 0 };
   }
 
-  /** Movement intent, not a position: the server is the one that integrates it. A fighting player can't move the map. */
+  /**
+   * Movement intent, not a position: the server is the one that integrates
+   * it. A fighting player can't move the map, and neither can a wiped
+   * (0 HP) one — their expedition has ended; letting them drift around
+   * exploring would misrepresent that to themselves and any teammate still
+   * watching the shared map. Co-op has no revive path, so hp <= 0 is final
+   * for this expedition (src/coop-main.ts gives the player a way to leave
+   * and start a new one).
+   */
   setIntent(id: string, dx: number, dy: number, now: number) {
     const p = this.players.get(id);
-    if (!p || !p.online || p.fightId) return;
+    if (!p || !p.online || p.fightId || p.hp <= 0) return;
     const len = Math.hypot(dx, dy);
     p.dir = len > 1 ? { x: dx / len, y: dy / len } : { x: dx, y: dy };
     p.lastSeen = now;

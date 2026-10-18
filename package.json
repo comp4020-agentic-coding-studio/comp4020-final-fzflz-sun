@@ -14,6 +14,7 @@
     "check:coop": "node tools/coop-live-check.mjs",
     "check:log": "node tools/coop-log-check.mjs",
     "check:xss": "node tools/coop-xss-check.mjs",
+    "check:wipe": "node tools/coop-wipe-check.mjs",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "playtest": "node tools/playtest.mjs",

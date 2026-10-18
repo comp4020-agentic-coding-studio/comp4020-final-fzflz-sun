@@ -73,6 +73,13 @@ jobs:
         # expected event types with distinct actor ids and no raw cookie or
         # stolen card content.
         run: pnpm check:log
+      - name: Check a party wipe shows a clear, persistent end-of-expedition state
+        # Real headless Chrome, desktop and phone viewports: a solo player is
+        # deterministically worn down by west-1's own attack (no RNG in
+        # damage) to a real 0-HP wipe, then asserts a persistent panel
+        # appears (not just a transient status line) with a working button
+        # that starts a fresh expedition via the existing create-room flow.
+        run: pnpm check:wipe http://localhost:8080
       - name: Keep browser screenshots and results
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

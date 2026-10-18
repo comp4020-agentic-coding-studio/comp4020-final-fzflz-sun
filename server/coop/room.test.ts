@@ -78,6 +78,17 @@ describe("CoopRoom: shared movement", () => {
     room.setOnline("p1", true, 1);
     expect(p.pos.x).toBe(999);
   });
+
+  it("a wiped (0 HP) player cannot move: setIntent is a no-op and their position is unchanged across ticks", () => {
+    const room = new CoopRoom("ABC123", 0);
+    const p = room.addPlayer("p1", "Ash", "#50a0ff", 0);
+    p.hp = 0; // the state a real party wipe leaves a player in (fight-session.ts's finish() never restores hp)
+    room.setIntent("p1", 1, 0, 0);
+    expect(p.dir).toEqual({ x: 0, y: 0 }); // the intent itself was never applied
+    const before = { ...p.pos };
+    room.tick(0, 1, rng(1));
+    expect(p.pos).toEqual(before);
+  });
 });
 
 describe("CoopRoom: shared enemies", () => {
