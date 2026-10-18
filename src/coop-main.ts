@@ -1,5 +1,5 @@
 import kaplay from "kaplay";
-import { escapeHtml, type CoopClientMsg, type CoopFightMsg, type CoopHandMsg, type CoopServerMsg } from "./coop-protocol.ts";
+import { escapeHtml, escapeKaplayText, type CoopClientMsg, type CoopFightMsg, type CoopHandMsg, type CoopServerMsg } from "./coop-protocol.ts";
 import { PLAYER_JOIN_RADIUS } from "./encounter.ts";
 import { formationBounds, layoutFormation, planCamera, type Unit as FormationUnit, type V, type Viewport } from "./formation.ts";
 import { AREAS, ENEMY_SPAWNS, PLAYER_EDGE, WORLD_HEIGHT, WORLD_WIDTH } from "./world.ts";
@@ -27,6 +27,7 @@ const ui = {
   roomCodeText: $("roomCodeText"),
   copyLinkBtn: $<HTMLButtonElement>("copyLinkBtn"),
   screen: $("screen"),
+  panel: $("panel"),
   nameInput: $<HTMLInputElement>("nameInput"),
   codeInput: $<HTMLInputElement>("codeInput"),
   createBtn: $<HTMLButtonElement>("createBtn"),
@@ -275,7 +276,7 @@ function ensurePlayer(id: string, name: string, color: string, x: number, y: num
   if (v) return v;
   const body = makePlayerBody(parseColor(color));
   body.pos = k.vec2(x, y);
-  const label = makeLabel(name, -28);
+  const label = makeLabel(escapeKaplayText(name), -28);
   label.pos = k.vec2(x, y - 28);
   v = { body, label, buf: [] };
   players.set(id, v);
@@ -317,7 +318,7 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     pushSnap(v.buf, { t: now, x: p.x, y: p.y });
     v.body.opacity = p.online ? (p.fightId ? 0.6 : 1) : 0.3;
     const tag = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
-    const label = `${p.name}${tag}`;
+    const label = `${escapeKaplayText(p.name)}${tag}`;
     if (v.label.text !== label) v.label.text = label;
 
     if (p.id === selfId) {
@@ -871,6 +872,28 @@ async function main() {
 function showFightEndFeedback(outcome: "won" | "wiped" | "abandoned") {
   const msg = outcome === "won" ? "Victory!" : outcome === "wiped" ? "You fell." : "Retreated.";
   setStatus(`${roomStatusPrefix()} — ${msg}`);
+  // A wipe isn't recoverable in this round's rules: the server never
+  // restores hp after it (server/coop/room.ts's setIntent now also refuses
+  // to move a 0-HP player), so a transient status line alone would leave
+  // the player standing in a world they can no longer act in with no
+  // visible sign why, or any way out beyond realizing they must start over.
+  // This reuses the exact join-screen dialog (#screen/#panel), already
+  // proven responsive at both desktop and phone widths, rather than a new
+  // component — it only ever navigates this tab to a fresh /coop.html
+  // (the existing create-room entry point), never touching roomCode/
+  // socket/any other player's state.
+  if (outcome === "wiped") showExpeditionEndedPanel();
+}
+
+function showExpeditionEndedPanel() {
+  ui.panel.innerHTML = `
+    <h1>Your expedition has ended</h1>
+    <p>Your party was wiped out. There's no way back into this run — start a new expedition when you're ready.</p>
+    <div class="row"><button class="primary" id="newExpeditionBtn" type="button">Start a new expedition</button></div>`;
+  ui.screen.hidden = false;
+  $<HTMLButtonElement>("newExpeditionBtn").onclick = () => {
+    location.href = "/coop.html";
+  };
 }
 
 main();

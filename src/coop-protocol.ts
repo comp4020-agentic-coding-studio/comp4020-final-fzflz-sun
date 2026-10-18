@@ -18,6 +18,22 @@ export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
+/**
+ * Kaplay's own text() has a separate styled-text grammar (see its $n() in
+ * node_modules/kaplay/dist/kaplay.js): an unescaped `[` or `]` is style-tag
+ * syntax, and a trailing unescaped `\` is an escape-sequence error. A name
+ * like `[Sun]` reaching src/coop-main.ts's makeLabel() unescaped throws
+ * "Styled text error: unclosed tags ..." inside applyState()'s per-player
+ * loop, aborting that whole snapshot for every client that receives it.
+ * escapeHtml above protects the DOM sink only — this protects Kaplay's
+ * canvas-text sink, which has entirely different special characters.
+ * Backslash must be escaped first, or a `\` inserted while escaping `[`/`]`
+ * would itself need re-escaping.
+ */
+export function escapeKaplayText(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+}
+
 export interface CoopPlayerView {
   id: string;
   name: string;
@@ -145,11 +161,15 @@ export interface CoopHandMsg {
   cards: CoopCardView[];
   energy: number;
   /**
-   * The server's last-accepted action sequence number for this player in
-   * this fight. A refreshed client's own counter always starts back at 0, so
-   * it adopts this value (never going backwards) before sending its next
-   * action — otherwise that action is indistinguishable from a stale replay
-   * and the server correctly rejects it.
+   * The server's last-ACCEPTED (not merely attempted) action sequence
+   * number for this player in this fight: a rejected action (invalid card,
+   * insufficient energy, bad target, ...) never advances this, so a client
+   * can safely resend a corrected action at the SAME seq rather than
+   * needing to guess a new one. A refreshed client's own counter always
+   * starts back at 0, so it adopts this value (never going backwards)
+   * before sending its next action — otherwise that action is
+   * indistinguishable from a stale replay and the server correctly rejects
+   * it.
    */
   lastSeq: number;
 }

@@ -100,12 +100,70 @@ async function openTab(label) {
     click: async (selector) => evaluate(`document.querySelector(${JSON.stringify(selector)})?.click()`),
     keyDown: async (key, code) => send("Input.dispatchKeyEvent", { type: "keyDown", key, code }),
     keyUp: async (key, code) => send("Input.dispatchKeyEvent", { type: "keyUp", key, code }),
+    state: async () => {
+      const s = await evaluate("JSON.stringify(window.__coop?.())");
+      return s ? JSON.parse(s) : null;
+    },
     close: () => {
       try {
         chrome.kill();
       } catch {}
     },
   };
+}
+
+const KEY_CODES = { w: "KeyW", a: "KeyA", s: "KeyS", d: "KeyD" };
+
+/**
+ * Keyboard input only offers 8 directions, unlike a WS-level check's
+ * arbitrary unit vectors — a fixed diagonal heading can geometrically miss
+ * an enemy's actual spawn point by design, not as a flake (the same issue
+ * round 3's own correction record documented for coop-formation-2p-check.mjs,
+ * and which tools/coop-identity-demo-check.mjs's steerToward() already fixed
+ * for this file's own earlier, since-removed fixed w+d heading). So this
+ * steers live: each step, recompute which of the 8 directions most closely
+ * points from the tab's own last known position toward `target`.
+ */
+async function steerToward(tab, target, heldKeys, maxIters = 60) {
+  for (let i = 0; i < maxIters; i++) {
+    const g = await tab.state();
+    if (g?.fight) return true;
+    const pos = g?.selfPos;
+    if (pos) {
+      const dx = target.x - pos.x;
+      const dy = target.y - pos.y;
+      const want = new Set();
+      if (Math.abs(dx) > 10) want.add(dx > 0 ? "d" : "a");
+      if (Math.abs(dy) > 10) want.add(dy > 0 ? "s" : "w");
+      for (const k of Object.keys(KEY_CODES)) {
+        const should = want.has(k);
+        const is = heldKeys.has(k);
+        if (should && !is) {
+          await tab.keyDown(k, KEY_CODES[k]);
+          heldKeys.add(k);
+        } else if (!should && is) {
+          await tab.keyUp(k, KEY_CODES[k]);
+          heldKeys.delete(k);
+        }
+      }
+    }
+    await sleep(200);
+  }
+  return false;
+}
+
+async function releaseAll(tab, heldKeys) {
+  for (const k of [...heldKeys]) {
+    await tab.keyUp(k, KEY_CODES[k]);
+    heldKeys.delete(k);
+  }
+}
+
+async function walkTogether(tabs, target, maxIters = 60) {
+  const heldSets = tabs.map(() => new Set());
+  const results = await Promise.all(tabs.map((t, i) => steerToward(t, target, heldSets[i], maxIters)));
+  await Promise.all(tabs.map((t, i) => releaseAll(t, heldSets[i])));
+  return results.some(Boolean);
 }
 
 // A payload that, if ever actually parsed as an element and executed, logs a
@@ -130,16 +188,12 @@ async function main() {
   await victim.click("#joinBtn");
   await sleep(800);
 
-  // walk both toward the camp together, so the attacker's crafted name ends up as the
-  // victim's attack-intent target string (the real sink this fix closes), not just the roster
-  await Promise.all([attacker.keyDown("w", "KeyW"), attacker.keyDown("d", "KeyD"), victim.keyDown("w", "KeyW"), victim.keyDown("d", "KeyD")]);
-  let started = false;
-  for (let i = 0; i < 40 && !started; i++) {
-    await sleep(250);
-    const g = await victim.evaluate("JSON.stringify(window.__coop?.())").then((s) => (s ? JSON.parse(s) : null));
-    if (g?.fight) started = true;
-  }
-  await Promise.all([attacker.keyUp("w", "KeyW"), attacker.keyUp("d", "KeyD"), victim.keyUp("w", "KeyW"), victim.keyUp("d", "KeyD")]);
+  // walk both toward west-1's real spawn (src/world.ts) together, so the attacker's crafted
+  // name ends up as the victim's attack-intent target string (the real sink this fix closes),
+  // not just the roster. Live-steered rather than a fixed diagonal, which can geometrically
+  // miss this spawn and walk toward a farther camp instead (see tools/coop-identity-demo-check.mjs's
+  // steerToward(), the same fix applied here).
+  const started = await walkTogether([attacker, victim], { x: 640, y: 380 });
   check(started, "both players enter a shared fight");
 
   await sleep(500);
@@ -189,6 +243,49 @@ async function main() {
   attacker.close();
   victim.close();
   observer.close();
+
+  // Bracketed/backslash names: Kaplay's own text() treats unescaped [ ] as
+  // style-tag syntax and a trailing unescaped \ as an escape error — a name
+  // like "[Sun]" reaching src/coop-main.ts's makeLabel()/applyState()
+  // unescaped throws "Styled text error: unclosed tags ...", confirmed in a
+  // real two-profile reproduction. escapeHtml (proven above) does nothing
+  // for this different sink; this exercises src/coop-protocol.ts's
+  // escapeKaplayText() through the real create/join flow, in two
+  // independent local profiles, joining by invite link.
+  for (const bracketName of ["[Sun]", "]", "[", "mismatched]tag[", "a\\", "反\\斜[杠]"]) {
+    const a = await openTab("bracket-a");
+    await a.navigate("/coop.html");
+    await sleep(500);
+    await a.setValue("#nameInput", bracketName);
+    await a.click("#createBtn");
+    await sleep(800);
+    const aState = await a.state();
+    check(!!aState?.selfId, `[${bracketName}] the room creator gets a resolved identity (no canvas-text crash)`);
+    check(!!aState?.selfPos, `[${bracketName}] the room creator's own position is not null after applyState`);
+    const codeMatch = /^room ([A-Z0-9]{6})/.exec(aState?.status ?? "");
+    const code = codeMatch?.[1];
+
+    const b = await openTab("bracket-b");
+    if (code) {
+      await b.navigate(`/coop.html?code=${code}`);
+      await sleep(300);
+      await b.setValue("#nameInput", "Observer");
+      await b.click("#joinBtn");
+      await sleep(800);
+    }
+    const bState = await b.state();
+    check(!!bState?.selfId, `[${bracketName}] a second profile joining via invite link also gets a resolved identity`);
+    check((bState?.players?.length ?? 0) >= 2, `[${bracketName}] the joiner's own player list is populated, not empty from an aborted state-apply`);
+
+    const aRoster = await a.evaluate("document.getElementById('roster')?.textContent ?? ''");
+    check(aRoster.includes(bracketName), `[${bracketName}] the name displays in the DOM roster exactly as typed (got ${JSON.stringify(aRoster)})`);
+    check(a.pageErrors.length === 0, `[${bracketName}] no page errors on the name-owner's client (${a.pageErrors.slice(0, 2).join(" | ")})`);
+    check(b.pageErrors.length === 0, `[${bracketName}] no page errors on the joining client (${b.pageErrors.slice(0, 2).join(" | ")})`);
+
+    a.close();
+    b.close();
+  }
+
   console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
   process.exit(failures ? 1 : 0);
 }
