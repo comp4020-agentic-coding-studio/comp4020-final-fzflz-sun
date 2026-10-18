@@ -1,50 +1,37 @@
 # Crit 10 reflection: Fly by instruments
 
-*Author-review draft, 17 October 2026. Drafted from the actual work done this
-round, not from a recorded design discussion — unlike crit 9's reflection,
-there is no author-stated feedback or feeling behind this round's choices to
-draw from yet. The paragraphs marked below need the author's own words before
-this file can be considered finished; nothing here claims a real human
-two-person demo or crit feedback has happened.*
+*Author-review draft, 18 October 2026, prepared with Codex from recorded
+requests and repository evidence. Personal conclusions need author review;
+no human two-person demo is claimed.*
 
 ## What was the breakthrough that moved the work forward?
 
-*[PENDING — needs the author's own account.]* What can be stated as fact,
-not feeling: the actual breakthrough this round was procedural rather than a
-new idea. A source review of the existing co-op server found that the
-identity and authorization mechanics C10 asks for were already correct,
-built in crit 9 and never revisited since — both `cc_visitor` and `cc_coop`
-were already server-derived from a hashed cookie, never a value the client
-could supply, and every fight action already traced back to the connection
-that sent it, not anything named in the message body. The real work this
-round was proving that, not building it: writing the permission table down
-in [ADR 0007](../docs/adr/0007-coop-identity-and-permissions.md), finding
-the one place it genuinely wasn't true (the room-peek endpoint handing out
-the full member list to anyone who knew the code), and adding the logging
-and automated checks that turn "the server already does this" from a
-code-reading claim into something a test — and eventually a real demo
-narrated from `flyctl logs` — can actually show.
+The useful shift was making shared play explainable from server evidence.
+I had already asked for nearby players to enter encounters automatically
+while retaining their own cards and choices. C10 made identity, ownership
+and observation explicit parts of that experience.
 
-*[The author should say here whether this \"it was already correct\" result
-felt like a relief, a letdown, or something else — and whether discovering
-that through a deliberate source review (rather than a symptom report, the
-way every earlier round started) changed how they think about verifying a
-system versus just building the next feature on top of it.]*
+The existing anonymous cookies supplied an identity model. The implementation
+documented its costs, narrowed room peeking, tested private hands and
+introduced business logs. Real browser profiles then exercised joining by
+invitation, independent actions and reconnecting. Those checks give concrete
+evidence for the design.
+
+The latest review also challenged their scope. A permissions test failed
+because it assumed a particular random hand. A bracketed nickname broke the
+canvas text parser despite the earlier HTML fix. Logging checks passed while
+review still found a failed forced flee recorded as success. These findings
+make precise acceptance scenarios essential.
 
 ## What did this work change about who I want to be as a software developer?
 
-*[PENDING — needs the author's own account.]* One thing this round made
-concrete: a system that is correct but silent is not yet trustworthy to
-someone who didn't write it. Before this round, nobody — not a teammate, not
-the author a week later — could look at the running server and say with any
-confidence who did what, or prove that one player genuinely couldn't act as
-another; that confidence lived only in the source code and the author's own
-memory of having read it carefully. Building `server/log.ts` and the checks
-around it was less about adding a feature and more about making an existing
-guarantee legible to someone who isn't the person who wrote it.
+I want to make the intended experience, server rules and evidence agree.
+Being able to see an event name is only a starting point: the record needs
+to identify the actor and accurately describe what actually happened.
 
-*[The author should say here what this changes about how they'll build the
-next system — whether "can someone else tell what happened, just from what
-it wrote down" becomes a standing question they ask before calling something
-done, and whether that connects to or complicates the evidence habit from
-crit 8/9.]*
+My repeated requests for review and more concrete prompts show the workflow
+I want to develop. Corrections should become useful checks and clear process
+records. I also need to distinguish code inspection, isolated reproduction,
+deployment evidence and human judgment. The deployed build has passed CI;
+a real two-person session narrated from its logs remains an outstanding
+observation.

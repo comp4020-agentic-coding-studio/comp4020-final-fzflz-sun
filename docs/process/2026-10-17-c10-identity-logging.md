@@ -1,7 +1,7 @@
 # Stage card: Crit 10 — identity, permissions and server-side logging
 
 Title / date: Crit 10 "Fly by instruments", 2026-10-17
-Status: implemented and verified locally (including the production Docker image); not yet deployed; awaiting a real human two-person demo
+Status at original verification: implemented and verified locally (including the production Docker image). Update, 18 October: CI and deployment of `3fd04f7` succeeded; Fly log-stream inspection and a real human two-person demo remain unrecorded.
 Starting commit: `a13d462` (round 4's final, locally-verified state)
 
 ## Player problem and evidence
@@ -224,9 +224,11 @@ by URL alone."
   reusing this round's live-steering fix from `coop-identity-demo-check.mjs`.
 - **2026-10-17, agent, independent re-verification after this card's own
   commit** (`4d00ee7`), fresh container from the already-built `app:latest`
-  image: `verify-deploy`'s own `sourceRevision` field confirmed the image
-  was built from `4d00ee7` exactly with `worktreeDirty: false`, so this run
-  verifies the actual committed state, not a stale build. `APP_URL=...
+  image. Correction, 18 October: `verify-deploy`'s `sourceRevision` and
+  `worktreeDirty` identify the checking checkout (`4d00ee7`, clean), not
+  the image. Those fields cannot establish which revision the container
+  was built from; no image fingerprint was recorded here. The reported
+  outcomes of the earlier checks are retained: `APP_URL=...
   pnpm check` 444/444; `pnpm check:browser` full pass; `pnpm check:deploy
   -- ...` `{"ok": true, ...}`; `node tools/coop-live-check.mjs <url>` 5/5
   scenarios in one run (no flake this time); `node tools/coop-xss-check.mjs
@@ -280,9 +282,18 @@ by URL alone."
 
 ## Deployment
 
-Not deployed as part of writing this card; see the end-of-stage report.
-`flyctl logs` has not yet been exercised against the real deployed app —
-required once before the live demo, not performable locally.
+Not deployed during the original local verification recorded above.
+Read-only verification on 18 October confirmed that
+[workflow 39029743347](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/39029743347)
+subsequently checked and deployed `3fd04f7` successfully, including the
+post-deploy page/assets/README/save check. This is workflow provenance,
+not an application-returned build fingerprint. No deployment was performed
+during the 18 October documentation review.
+
+No inspection of the real Fly log stream or human two-person narration
+exercise is recorded. The [18 October review](2026-10-18-c10-review.md)
+also records new failures and source findings; this card's earlier passing
+checks do not close them.
 
 ## Demo narration notes (for the live crit demo)
 
