@@ -76,6 +76,38 @@ function connect(code: string, cookie: string): Promise<{ ws: WebSocket; msgs: a
 
 const last = (c: { msgs: any[] }, type: string) => [...c.msgs].reverse().find((m) => m.type === type);
 
+/** Polls until `msgs` contains a NEW message of `type` beyond `countBefore`, rather than a fixed sleep followed by reading whatever's last (which can read a stale message if the server hasn't responded yet). Returns the new message, or throws with diagnostics on timeout. */
+async function waitForNext(c: { msgs: any[] }, type: string, countBefore: number, label: string, maxIters = 20): Promise<any> {
+  for (let i = 0; i < maxIters; i++) {
+    const matches = c.msgs.filter((m) => m.type === type);
+    if (matches.length > countBefore) return matches[matches.length - 1];
+    await sleep(50);
+  }
+  throw new Error(`${label}: no new "${type}" message arrived (had ${countBefore}, still have ${c.msgs.filter((m) => m.type === type).length}); last few messages: ${JSON.stringify(c.msgs.slice(-5))}`);
+}
+
+/**
+ * Picks an affordable card to play, preferring a non-single (no-target-needed)
+ * card; falls back to a single-target card against a real, currently-standing
+ * enemy from `fight` when the hand happens to be entirely single-target cards
+ * — a real, reproducible possibility from the 14-card deck's shuffle (5
+ * Strike/3 Cleave/3 Guard/3 Focus), not a theoretical one (see
+ * docs/process/2026-10-18-c10-review.md, finding 4). Throws with the full
+ * hand/fight content on failure rather than silently picking something
+ * unaffordable, matching tools/coop-live-check.mjs's own pickCardWithDelta.
+ */
+function pickAffordableCard(hand: any, fight: any, roomCode: string): { card: any; targetKey?: string } {
+  const affordable = hand.cards.filter((c: any) => c.cost <= hand.energy);
+  const nonSingle = affordable.find((c: any) => c.kind !== "single");
+  if (nonSingle) return { card: nonSingle };
+  const target = fight?.enemies?.find((e: any) => !e.downed);
+  const single = affordable.find((c: any) => c.kind === "single");
+  if (single && target) return { card: single, targetKey: target.key };
+  throw new Error(
+    `no playable card found (room ${roomCode}): hand=${JSON.stringify(hand)}, fight enemies=${JSON.stringify(fight?.enemies)}`,
+  );
+}
+
 /** Walks both clients together until a shared fight forms, then stops them. */
 async function walkIntoFight(a: Awaited<ReturnType<typeof connect>>, b: Awaited<ReturnType<typeof connect>>) {
   const heading = { dx: 1, dy: -0.65 };
@@ -289,19 +321,21 @@ describe("coop identity and authorization", () => {
 
     // A sends a malformed/adversarial action first
     const handB = last(b, "hand");
+    const actionErrorCountBefore = a.msgs.filter((m) => m.type === "actionError").length;
     a.send({ type: "playCard", seq: 1, cardInstanceId: handB.cards[0].id });
-    await sleep(200);
-    expect(last(a, "actionError")).toBeTruthy();
+    await waitForNext(a, "actionError", actionErrorCountBefore, "A's rejected cross-player card attempt");
 
-    // B's own, legitimate action still succeeds afterward
+    // B's own, legitimate action still succeeds afterward — pick whatever the
+    // actual dealt hand allows, including the real (reproducible) case where
+    // every card is single-target.
     const bEnergyBefore = handB.energy;
     const bHandCountBefore = handB.cards.length;
-    const affordable = handB.cards.find((c: any) => c.cost <= handB.energy && c.kind !== "single");
-    expect(affordable).toBeTruthy();
+    const bFight = last(b, "fight");
+    const { card: affordable, targetKey } = pickAffordableCard(handB, bFight, room.code);
     const errorCountBefore = b.msgs.filter((m) => m.type === "actionError").length;
-    b.send({ type: "playCard", seq: 1, cardInstanceId: affordable.id });
-    await sleep(300);
-    const bHandAfter = last(b, "hand");
+    const handCountBefore = b.msgs.filter((m) => m.type === "hand").length;
+    b.send({ type: "playCard", seq: 1, cardInstanceId: affordable.id, targetKey });
+    const bHandAfter = await waitForNext(b, "hand", handCountBefore, "B's legitimate play after A's rejected action");
     expect(bHandAfter.energy).toBe(bEnergyBefore - affordable.cost + (affordable.kind === "resource" ? 1 : 0));
     expect(bHandAfter.cards.length).toBe(affordable.kind === "resource" ? bHandCountBefore : bHandCountBefore - 1);
     expect(b.msgs.filter((m) => m.type === "actionError").length).toBe(errorCountBefore);
