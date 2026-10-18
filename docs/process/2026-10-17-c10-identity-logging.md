@@ -101,7 +101,12 @@ new ADR with an explicit boundary table and stated costs.
   which player an action is attributed to or who it affects. A rejected
   action must never alter any other player's, enemy's, or saved state.
   A rejection response must never reveal another player's hand, save
-  data, or credentials.
+  data, or credentials. Correction, 19 October: this never claimed a
+  rejected action leaves the *acting* player's own action-sequence
+  counter untouched — a real gap there (a rejected `playCard` was
+  advancing `lastSeq`, wrongly failing the next legitimate same-seq
+  action) is fixed in `docs/process/2026-10-19-c10-followup-fixes.md`;
+  see that card for the precise, now-true statement.
 - Current rule or ADR links affected: new `docs/adr/0007-...md`; no
   changes to ADR 0002/0005/0006's own content.
 

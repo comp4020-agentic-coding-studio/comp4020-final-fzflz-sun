@@ -46,6 +46,15 @@ export type FightAction =
 export interface ActionResult {
   ok: boolean;
   error?: string;
+  /**
+   * Minimal, server-confirmed facts about what actually happened — set only
+   * on a successful playCard, from the real card/target the server applied,
+   * never from the raw client message. ws.ts's business log uses this
+   * instead of echoing client-supplied fields, so a non-single card (Guard,
+   * Cleave, Focus) can never have an attacker-controlled targetKey logged
+   * against it, and every card log line names the real card played.
+   */
+  summary?: { cardName?: string; cardKind?: string; validTargetKey?: string };
 }
 
 interface PlayerFightState {
@@ -371,6 +380,17 @@ export class FightSession {
    * action that arrives after a later one has already been processed is
    * rejected here, before it can touch any state, so it can never double a
    * card's effect or double a readiness signal.
+   *
+   * `ps.lastSeq` only advances on a path that actually returns `{ ok: true
+   * }` — never on a rejection, even one that fails validation further down
+   * this function (card not in hand, insufficient energy, invalid target).
+   * A client whose action was rejected can resend a corrected action at the
+   * SAME seq, since it was never consumed; this is what
+   * src/coop-protocol.ts's CoopHandMsg.lastSeq doc comment means by
+   * "last-accepted," and what src/coop-main.ts's own seq-adoption logic
+   * already assumes. The stale-seq check above is unaffected: it compares
+   * against whatever `ps.lastSeq` actually is, so a genuinely-processed
+   * seq still can't be replayed.
    */
   applyAction(playerId: string, seq: number, action: FightAction, now: number, rng: () => number): ActionResult {
     if (this.ended) return { ok: false, error: "this fight has already ended" };
@@ -387,8 +407,6 @@ export class FightSession {
     }
     if (rp.ready) return { ok: false, error: "already readied up: can't play more cards" };
 
-    ps.lastSeq = seq;
-
     if (action.type === "playCard") {
       const idx = ps.handIds.indexOf(action.cardInstanceId);
       if (idx < 0) return { ok: false, error: "that card isn't in your hand (already played, or stale)" };
@@ -399,6 +417,7 @@ export class FightSession {
         const target = unitByKey(this.fight, action.targetKey);
         if (!target || target.downed) return { ok: false, error: "invalid or already-downed target" };
       }
+      ps.lastSeq = seq;
       takeFromHand(ps.piles, idx);
       ps.handIds.splice(idx, 1);
       ps.energy -= card.cost;
@@ -414,10 +433,11 @@ export class FightSession {
       }
       settlePlayed(ps.piles, card);
       if (isWon(this.fight)) this.finish(now, "won");
-      return { ok: true };
+      return { ok: true, summary: { cardName: card.name, cardKind: card.kind, validTargetKey: card.kind === "single" ? action.targetKey : undefined } };
     }
 
     if (action.type === "endTurn" || action.type === "flee") {
+      ps.lastSeq = seq;
       rp.ready = true;
       if (action.type === "flee") this.pendingFlee.add(playerId);
       if (this.allActiveReady()) this.resolveRound(now, rng);

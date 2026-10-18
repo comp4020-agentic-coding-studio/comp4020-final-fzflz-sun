@@ -129,6 +129,98 @@ describe("FightSession: playing cards", () => {
     expect(session.ended).toBeNull(); // west-2 still stands: the fight itself is unaffected
     expect(hand(session, "p1").some((c) => c.id === strike.id)).toBe(true); // the card was never spent
   });
+
+  it("a successful playCard's result carries the server-confirmed card name/kind, and the real target only for a single-target card", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const strike = findCard(session, "p1", "Strike");
+    const r = session.applyAction("p1", 1, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" }, 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ cardName: "Strike", cardKind: "single", validTargetKey: "west-1" });
+  });
+
+  it("a non-single card's result never carries a targetKey, even if one was attached to the request", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const guard = findCard(session, "p1", "Guard");
+    // a client attaching a targetKey to a card that doesn't use one at all — the server must
+    // never echo it back as though it were a real, validated target.
+    const r = session.applyAction("p1", 1, { type: "playCard", cardInstanceId: guard.id, targetKey: "x".repeat(2048) }, 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ cardName: "Guard", cardKind: "guard", validTargetKey: undefined });
+    expect(JSON.stringify(r.summary)).not.toContain("x".repeat(2048));
+  });
+});
+
+describe("FightSession: the action-sequence contract (lastSeq only advances on real success)", () => {
+  it("a rejected card-not-in-hand action at seq N does not advance lastSeq; a legitimate action still at seq N then succeeds", () => {
+    const { session } = setup(["p1"], ["west-1"]);
+    const before = session.handView("p1")!.lastSeq;
+    const bad = session.applyAction("p1", 2, { type: "playCard", cardInstanceId: "not-a-real-card" }, 0, rng(2));
+    expect(bad.ok).toBe(false);
+    expect(session.handView("p1")!.lastSeq).toBe(before); // unchanged by the rejection
+    // the exact same seq, now a legitimate action: must succeed, not be rejected as stale
+    const good = session.applyAction("p1", 2, { type: "endTurn" }, 0, rng(2));
+    expect(good.ok).toBe(true);
+    expect(session.handView("p1")!.lastSeq).toBe(2);
+  });
+
+  it("a rejected not-enough-energy action does not advance lastSeq, and the same seq can be retried with an affordable card", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    // spend down to 0 energy first
+    for (let i = 0; i < PLAYER_MAX_ENERGY; i++) {
+      const c = hand(session, "p1").find((x) => x.cost <= 1);
+      if (c) session.applyAction("p1", i + 1, { type: "playCard", cardInstanceId: c.id, targetKey: "west-1" }, 0, rng(1));
+    }
+    const lastSeqBefore = session.handView("p1")!.lastSeq;
+    const cleave = hand(session, "p1").find((c) => c.name === "Cleave");
+    if (cleave) {
+      const rejected = session.applyAction("p1", lastSeqBefore + 1, { type: "playCard", cardInstanceId: cleave.id }, 0, rng(1));
+      expect(rejected.ok).toBe(false);
+      expect(rejected.error).toMatch(/energy/);
+      expect(session.handView("p1")!.lastSeq).toBe(lastSeqBefore); // unchanged
+      // the same seq, now ending the turn instead: must succeed
+      const good = session.applyAction("p1", lastSeqBefore + 1, { type: "endTurn" }, 0, rng(1));
+      expect(good.ok).toBe(true);
+    }
+  });
+
+  it("a rejected invalid-target action does not advance lastSeq", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const strike = findCard(session, "p1", "Strike");
+    const before = session.handView("p1")!.lastSeq;
+    const rejected = session.applyAction("p1", 5, { type: "playCard", cardInstanceId: strike.id, targetKey: "no-such-enemy" }, 0, rng(2));
+    expect(rejected.ok).toBe(false);
+    expect(session.handView("p1")!.lastSeq).toBe(before);
+    const good = session.applyAction("p1", 5, { type: "endTurn" }, 0, rng(2));
+    expect(good.ok).toBe(true);
+    expect(session.handView("p1")!.lastSeq).toBe(5);
+  });
+
+  it("a real successful action still advances lastSeq normally (regression guard)", () => {
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const strike = findCard(session, "p1", "Strike");
+    const r = session.applyAction("p1", 1, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" }, 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(session.handView("p1")!.lastSeq).toBe(1);
+  });
+
+  it("deterministic all-single-card hand: every card in hand is a Strike, the exact scenario a shuffled 4-card hand can legitimately produce", () => {
+    // bypasses the shuffle entirely rather than relying on a seed that happens
+    // to deal all-Strike — this is the deterministic regression for the
+    // flake documented in docs/process/2026-10-18-c10-review.md (finding 4):
+    // a real 14-card deck (5 Strike/3 Cleave/3 Guard/3 Focus) CAN deal a
+    // 4-card hand that is entirely single-target cards.
+    const { session } = setup(["p1"], ["west-1"], { "west-1": 999 });
+    const ps = (session as unknown as { playerStates: Map<string, { piles: { hand: { name: string; kind: string }[] }; handIds: string[] }> }).playerStates.get("p1")!;
+    const strikeDef = { name: "Strike", kind: "single", cost: 1, value: 6, blurb: "6 dmg to target" };
+    ps.piles.hand = [strikeDef, strikeDef, strikeDef, strikeDef];
+    ps.handIds = ps.handIds.map((_, i) => `forced-${i}`);
+    const h = session.handView("p1")!;
+    expect(h.cards.every((c) => c.kind === "single")).toBe(true);
+    // a legitimate action against this all-single hand must still succeed with a real target
+    const r = session.applyAction("p1", 1, { type: "playCard", cardInstanceId: h.cards[0].id, targetKey: "west-1" }, 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(r.summary?.cardName).toBe("Strike");
+  });
 });
 
 describe("FightSession: the common player phase", () => {

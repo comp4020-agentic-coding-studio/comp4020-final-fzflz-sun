@@ -303,4 +303,135 @@ describe("CoopServer: business logging", () => {
     server.close();
   });
 
+  it("a successful card-play log carries the real card name, and a non-single card's garbage targetKey is never logged", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+
+    const guard = session.handView("p1")!.cards.find((c) => c.kind === "guard")!;
+    const garbage = "x".repeat(2048);
+    server.testHandleFightAction(room, "p1", 1, { type: "playCard", cardInstanceId: guard.id, targetKey: garbage });
+
+    const cardLogs = log.events.filter((ev) => ev.event === "coop.fight.card");
+    expect(cardLogs).toHaveLength(1);
+    expect(cardLogs[0].summary?.cardName).toBe("Guard");
+    expect(cardLogs[0].summary?.targetKey).toBeNull();
+    expect(JSON.stringify(cardLogs[0])).not.toContain(garbage);
+
+    server.close();
+  });
+
+  it("a legitimate single-target card play logs the real card name and the real target", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    e.hp = 999;
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+
+    const strike = session.handView("p1")!.cards.find((c) => c.kind === "single")!;
+    server.testHandleFightAction(room, "p1", 1, { type: "playCard", cardInstanceId: strike.id, targetKey: "west-1" });
+
+    const cardLogs = log.events.filter((ev) => ev.event === "coop.fight.card");
+    expect(cardLogs).toHaveLength(1);
+    expect(cardLogs[0].summary?.cardName).toBe("Strike");
+    expect(cardLogs[0].summary?.targetKey).toBe("west-1");
+
+    server.close();
+  });
+
+  it("a downed player's reconnect-window timeout logs result:rejected, never a false success", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    room.players.get("p1")!.online = false; // disconnected, matching the real reconnect-timeout precondition
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+    // force p1 downed, the one real forceFlee-rejects case (fight-session.ts's "not an active member")
+    session.fight.players.find((p) => p.id === "p1")!.downed = true;
+
+    server.testHandleReconnectTimeout(room, "p1");
+
+    const fleeLogs = log.events.filter((ev) => ev.event === "coop.fight.flee");
+    expect(fleeLogs).toHaveLength(1);
+    expect(fleeLogs[0].result).toBe("rejected");
+    expect(fleeLogs[0].summary?.left).toBe(false);
+    expect(fleeLogs[0].summary?.requested).toBe(true);
+    // the player really is still downed and still in the fight: nothing was falsely resolved
+    expect(room.players.get("p1")!.fightId).toBe("f1");
+
+    server.close();
+  });
+
+  it("a normal (not downed) reconnect-window timeout still logs result:ok with summary.left true", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    room.players.get("p1")!.online = false;
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+
+    server.testHandleReconnectTimeout(room, "p1");
+
+    const fleeLogs = log.events.filter((ev) => ev.event === "coop.fight.flee");
+    expect(fleeLogs).toHaveLength(1);
+    expect(fleeLogs[0].result).toBe("ok");
+    expect(fleeLogs[0].summary?.left).toBe(true);
+    expect(fleeLogs[0].summary?.forced).toBe(true);
+
+    server.close();
+  });
+
 });

@@ -505,18 +505,36 @@ export class CoopServer {
       key,
       setTimeout(() => {
         this.reconnectTimers.delete(key);
-        const member = room.players.get(playerId);
-        if (!member || member.online) return; // reconnected (or left) through some other path already
-        const fightId = member.fightId;
-        if (!fightId) return; // the fight they were in already ended on its own
-        const session = this.sessions.get(sessionKey(room.code, fightId));
-        if (!session) return;
-        const initialMembers = session.initialPlayerIds;
-        session.forceFlee(playerId, Date.now() / 1000, Math.random);
-        this.logger.log({ event: "coop.fight.flee", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, result: "ok", summary: { forced: true } });
-        this.afterFightChange(room, fightId, session, initialMembers);
+        this.handleReconnectTimeout(room, playerId);
       }, RECONNECT_WINDOW_MS).unref(),
     );
+  }
+
+  /**
+   * The reconnect window actually expiring: never assumed to succeed. A
+   * downed or already-fled player's forceFlee is correctly rejected by
+   * FightSession (they never left), and this must be logged as such — not
+   * as a successful flee, which would misreport a player who's still stuck
+   * in the fight as having gotten out. Split out from armReconnectTimer's
+   * setTimeout callback so a test can exercise this exact path directly
+   * (the real timer isn't awaitable in a unit test).
+   */
+  private handleReconnectTimeout(room: CoopRoom, playerId: string) {
+    const member = room.players.get(playerId);
+    if (!member || member.online) return; // reconnected (or left) through some other path already
+    const fightId = member.fightId;
+    if (!fightId) return; // the fight they were in already ended on its own
+    const session = this.sessions.get(sessionKey(room.code, fightId));
+    if (!session) return;
+    const initialMembers = session.initialPlayerIds;
+    const result = session.forceFlee(playerId, Date.now() / 1000, Math.random);
+    this.logger.log({
+      event: "coop.fight.flee", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId,
+      result: result.ok ? "ok" : "rejected",
+      reason: result.ok ? undefined : reasonCodeFor(result.error),
+      summary: { forced: true, requested: true, left: result.ok },
+    });
+    if (result.ok) this.afterFightChange(room, fightId, session, initialMembers);
   }
 
   private cancelReconnectTimer(roomCode: string, playerId: string) {
@@ -571,7 +589,12 @@ export class CoopServer {
     const logEvent = action.type === "playCard" ? "coop.fight.card" : action.type === "endTurn" ? "coop.fight.endTurn" : "coop.fight.flee";
     this.logger.log({
       event: logEvent, ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId, seq, result: "ok",
-      summary: action.type === "playCard" ? { targetKey: action.targetKey ?? null } : undefined,
+      // server-confirmed facts only (result.summary), never the raw client
+      // message: a non-single card's targetKey is never included here,
+      // regardless of what the client attached to it.
+      summary: action.type === "playCard"
+        ? { cardName: result.summary?.cardName ?? null, cardKind: result.summary?.cardKind ?? null, targetKey: result.summary?.validTargetKey ?? null }
+        : undefined,
     });
     for (const downedId of session.takeJustDowned()) {
       this.logger.log({ event: "coop.fight.downed", ts: Date.now(), identityNs: "coop", roomId: room.code, fightId, targetId: downedId, result: "ok" });
@@ -717,6 +740,11 @@ export class CoopServer {
   /** Test-only: drives a fight action through the same path a real WebSocket message does, without needing a real socket — so a test can assert on the logger's exact output for a real rejection/success. */
   testHandleFightAction(room: CoopRoom, playerId: string, seq: number, raw: { type: string } & Record<string, unknown>): void {
     this.handleFightAction(room, playerId, seq, raw);
+  }
+
+  /** Test-only: drives the real reconnect-window-expired path without waiting for the actual timer, so a test can assert the logger's exact output for both the downed (rejected) and normal (ok) cases. */
+  testHandleReconnectTimeout(room: CoopRoom, playerId: string): void {
+    this.handleReconnectTimeout(room, playerId);
   }
 
   /** Test-only: drives the REST room-create/join/peek path through a fake request/response pair, so a test can assert on the logger's exact output without a real HTTP server. */
