@@ -797,6 +797,11 @@ function connectSocket() {
       // load, which starts with no fight state anyway) must drop any stale
       // fight dock it's still holding when the server reports no active fight.
       if (msg.fightId === null && currentFight) closeFightDock();
+      // fightId alone can't distinguish "never fought" from "fought and
+      // wiped" (both null) — a fresh page load or a reconnect after a wipe
+      // needs its own signal, since there's no live fightEnded message to
+      // show the panel from in either case.
+      if (msg.expeditionEnded === "wiped") showExpeditionEndedPanel();
     } else if (msg.type === "state") {
       applyState(msg);
       for (const p of msg.players) memberNames.set(p.id, p.name);

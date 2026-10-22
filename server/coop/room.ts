@@ -48,6 +48,18 @@ export interface RoomPlayer {
   lastSeen: number;
   /** the fight this player is in, fixed for its duration; null while free exploring */
   fightId: string | null;
+  /**
+   * Set once, by CoopServer.tryFinishFight, only when a fight this player
+   * was in actually committed as "wiped" — never for won/abandoned, and
+   * never cleared afterward (co-op has no revive path: this expedition is
+   * genuinely over for them). Persisted and restored across a restart, and
+   * sent in `hello` so a reload/reconnect shows the same end-of-expedition
+   * panel a live wipe does, not just the transient status line. A fresh
+   * identity joining the same room afterward gets their own RoomPlayer via
+   * addPlayer(), which never sets this — a late joiner who wasn't part of
+   * the wiped fight is unaffected.
+   */
+  expeditionEnded: "wiped" | null;
 }
 
 /**
@@ -154,7 +166,7 @@ export class CoopRoom {
     }
     const p: RoomPlayer = {
       id, name, color, pos: { ...PLAYER_START }, hp: PLAYER_MAX_HP, block: 0, ready: false,
-      dir: { x: 0, y: 0 }, online: true, lastSeen: now, fightId: null,
+      dir: { x: 0, y: 0 }, online: true, lastSeen: now, fightId: null, expeditionEnded: null,
     };
     this.players.set(id, p);
     return p;

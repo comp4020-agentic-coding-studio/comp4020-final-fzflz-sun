@@ -166,6 +166,12 @@ async function runWipeScenario(viewport, label) {
     return;
   }
 
+  // Negative check: mid-fight, before any wipe, the panel must NOT be showing —
+  // confirms the later positive check is actually meaningful, not just "the
+  // screen happened to be visible the whole time."
+  const panelHiddenMidFight = await tab.evaluate("document.getElementById('screen')?.hidden !== false");
+  check(panelHiddenMidFight, `[${label}] the expedition-ended panel is NOT shown while the fight is still in progress`);
+
   // Repeatedly end turn WITHOUT playing Guard: west-1 deals exactly 3
   // unblocked damage per round against 24 max HP, so this is a deterministic
   // 8-round wipe, not a race against a random hand.
@@ -183,6 +189,32 @@ async function runWipeScenario(viewport, label) {
   check(panelHtml.includes("expedition has ended") || panelHtml.toLowerCase().includes("wiped"), `[${label}] the panel's own text says the expedition is over (got ${JSON.stringify(panelHtml.slice(0, 120))})`);
   const hasButton = await tab.evaluate("!!document.getElementById('newExpeditionBtn')");
   check(hasButton, `[${label}] a working "start a new expedition" button is present`);
+
+  // Reload (a fresh page load over the same URL, same cookie identity) must
+  // show the SAME panel again — fightId alone can't distinguish "never
+  // fought" from "fought and wiped" (both null), so this exercises the
+  // server's own persisted/hello-restored expeditionEnded flag, not just
+  // the live fightEnded path already proven above. A fresh load always
+  // shows the join form first (no silent auto-rejoin — same real behavior
+  // tools/coop-identity-demo-check.mjs's own reconnect step documents), so
+  // Join must be clicked again with the same cc_coop cookie to actually
+  // reach `hello`.
+  await sleep(300); // let the server's debounced snapshot/commit settle before reloading
+  const samePath = await tab.evaluate("location.pathname + location.search");
+  await tab.navigate(samePath);
+  await sleep(500);
+  await tab.click("#joinBtn");
+  let panelAfterReload = false;
+  for (let i = 0; i < 20 && !panelAfterReload; i++) {
+    await sleep(300);
+    panelAfterReload = await tab.evaluate("document.getElementById('screen')?.hidden === false");
+  }
+  check(panelAfterReload, `[${label}] reloading the page after a wipe (then rejoining with the same cookie) still shows the expedition-ended panel`);
+  const panelHtmlAfterReload = await tab.evaluate("document.getElementById('panel')?.innerHTML ?? ''");
+  check(
+    panelHtmlAfterReload.includes("expedition has ended") || panelHtmlAfterReload.toLowerCase().includes("wiped"),
+    `[${label}] the reloaded panel's own text still says the expedition is over`,
+  );
 
   // The button must actually navigate away from this ended session (to a
   // fresh /coop.html, the existing create-room entry point) — not just be

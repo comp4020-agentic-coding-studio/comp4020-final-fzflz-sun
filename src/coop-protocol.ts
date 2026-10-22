@@ -75,6 +75,14 @@ export interface CoopHelloMsg {
    * gone) — this field is how `hello` alone can still carry that fact.
    */
   fightId: string | null;
+  /**
+   * "wiped" if a fight this player was in has ever committed as a party
+   * wipe — never set for won/abandoned, and (co-op has no revive) never
+   * cleared afterward. Lets a fresh page load or a reconnect show the same
+   * end-of-expedition panel a live wipe does, since fightId alone can't
+   * distinguish "never fought" from "fought and wiped" (both are null).
+   */
+  expeditionEnded: "wiped" | null;
 }
 
 export interface CoopStateMsg {
