@@ -103,7 +103,7 @@ function reasonCodeFor(error: string | undefined): string {
 }
 
 interface PersistedRoom {
-  players: { id: string; x: number; y: number; hp: number }[];
+  players: { id: string; x: number; y: number; hp: number; expeditionEnded?: "wiped" }[];
   enemies: { key: string; x: number; y: number; cx: number; cy: number; state: string; targetId: string | null; hp: number; phase: number; alive: boolean }[];
 }
 
@@ -398,6 +398,7 @@ export class CoopServer {
       selfId: playerId,
       room: { code: room.code, members: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color })) },
       fightId: room.players.get(playerId)?.fightId ?? null,
+      expeditionEnded: room.players.get(playerId)?.expeditionEnded ?? null,
     };
     ws.send(JSON.stringify(hello));
 
@@ -518,6 +519,14 @@ export class CoopServer {
    * in the fight as having gotten out. Split out from armReconnectTimer's
    * setTimeout callback so a test can exercise this exact path directly
    * (the real timer isn't awaitable in a unit test).
+   *
+   * This log is request-level only: it never claims the player has
+   * actually left (even on `result.ok`, since the round may still be
+   * pending a teammate's own action) — `summary.queued` says whether this
+   * exact call resolved it or not. The one authoritative "they actually
+   * left" record is `coop.fight.left`, logged once in afterFightChange
+   * when FightSession.takeJustLeft() confirms it, however the departure
+   * was triggered (this timeout, or an ordinary in-fight Flee click).
    */
   private handleReconnectTimeout(room: CoopRoom, playerId: string) {
     const member = room.players.get(playerId);
@@ -532,7 +541,7 @@ export class CoopServer {
       event: "coop.fight.flee", ts: Date.now(), identityNs: "coop", actorId: playerId, roomId: room.code, fightId,
       result: result.ok ? "ok" : "rejected",
       reason: result.ok ? undefined : reasonCodeFor(result.error),
-      summary: { forced: true, requested: true, left: result.ok },
+      summary: result.ok ? { forced: true, requested: true, queued: !result.left } : { forced: true, requested: true, left: false },
     });
     if (result.ok) this.afterFightChange(room, fightId, session, initialMembers);
   }
@@ -624,9 +633,16 @@ export class CoopServer {
       // someone who personally left (an individual flee) this round, while the fight
       // itself continues for the rest: they get no fightEnded, so they need their own
       // explicit "you're out" message or their client would keep showing the stale dock.
+      // This is also the one authoritative point a departure is ever logged as
+      // actually having happened (coop.fight.left) — takeJustLeft() drains its
+      // own list exactly once per resolve, so this fires exactly once per real
+      // departure, whatever triggered it (a forced-flee timeout, one that was
+      // queued and later resolved by a teammate's own action, or an ordinary
+      // in-fight Flee click).
       for (const pid of session.takeJustLeft()) {
-        const left: CoopLeftFightMsg = { type: "leftFight", fightId: session.id, outcome: "fled" };
-        this.sendTo(room, pid, left);
+        const leftMsg: CoopLeftFightMsg = { type: "leftFight", fightId: session.id, outcome: "fled" };
+        this.sendTo(room, pid, leftMsg);
+        this.logger.log({ event: "coop.fight.left", ts: Date.now(), identityNs: "coop", actorId: pid, roomId: room.code, fightId, result: "ok", summary: { left: true } });
       }
       const view = session.fightView();
       for (const pid of session.playerIds) {
@@ -651,11 +667,27 @@ export class CoopServer {
    */
   private tryFinishFight(room: CoopRoom, fightId: string, session: FightSession, initialMembers: string[]): boolean {
     const now = Date.now();
+    // Applied to the live room BEFORE the commit attempt, so persist()
+    // below captures it in the same snapshot — but rolled back if the
+    // commit fails, so a retry-pending wipe is never shown as final (via
+    // hello, or a future persisted snapshot) before it's actually durable,
+    // matching this function's existing "no false success" discipline for
+    // everything else it does. Only ever for a real party wipe, never
+    // won/abandoned.
+    const wipedMembers = session.ended === "wiped" ? (session.finalPlayerIds ?? initialMembers) : [];
+    for (const pid of wipedMembers) {
+      const rp = room.players.get(pid);
+      if (rp) rp.expeditionEnded = "wiped";
+    }
     const roomStateJson = JSON.stringify(persist(room));
     const wasPending = this.pendingFinishes.has(sessionKey(room.code, fightId));
     try {
       this.store.finishFight(room.code, fightId, roomStateJson, now);
     } catch (e) {
+      for (const pid of wipedMembers) {
+        const rp = room.players.get(pid);
+        if (rp) rp.expeditionEnded = null;
+      }
       console.error(`[coop] finishFight failed for ${room.code}:${fightId}, will retry next tick:`, e);
       this.logger.log({ event: "coop.fight.ended", ts: now, roomId: room.code, fightId, result: "error", reason: "finish_commit_failed" });
       return false;
@@ -714,6 +746,11 @@ export class CoopServer {
     this.rooms.set(room.code, room);
   }
 
+  /** Test-only: drives the real cold-load path (restore from the store, including a mid-fight resume) without a real HTTP/WS request — so a test can confirm what actually survives a restart, not just what a hand-built CoopRoom happens to report. */
+  testGetOrLoadRoom(code: string): CoopRoom | null {
+    return this.getOrLoadRoom(code);
+  }
+
   /** Test-only: registers a fake, always-open socket for a player and returns the array every message sent to it lands in, so a test can assert exactly what was (or wasn't) notified. */
   testRegisterFakeSocket(roomCode: string, playerId: string): CoopServerMsg[] {
     const sent: CoopServerMsg[] = [];
@@ -726,6 +763,17 @@ export class CoopServer {
 
   testHasSession(code: string, fightId: string): boolean {
     return this.sessions.has(sessionKey(code, fightId));
+  }
+
+  /** Test-only: builds exactly the `hello` message onConnect would send for this player, without a real socket — so a test can assert on expeditionEnded/fightId without driving a real connect. */
+  testHello(room: CoopRoom, playerId: string): CoopHelloMsg {
+    return {
+      type: "hello",
+      selfId: playerId,
+      room: { code: room.code, members: [...room.players.values()].map((p) => ({ id: p.id, name: p.name, color: p.color })) },
+      fightId: room.players.get(playerId)?.fightId ?? null,
+      expeditionEnded: room.players.get(playerId)?.expeditionEnded ?? null,
+    };
   }
 
   /** Test-only: registers an already-constructed session the way tickAll's new-fight path would, so a test can drive real actions against it without a real WebSocket connecting first. */
@@ -854,7 +902,9 @@ function broadcast(sockets: Set<{ ws: WebSocket; playerId: string }>, msg: CoopS
 
 function persist(room: CoopRoom): PersistedRoom {
   return {
-    players: [...room.players.values()].map((p) => ({ id: p.id, x: p.pos.x, y: p.pos.y, hp: p.hp })),
+    players: [...room.players.values()].map((p) => ({
+      id: p.id, x: p.pos.x, y: p.pos.y, hp: p.hp, ...(p.expeditionEnded ? { expeditionEnded: p.expeditionEnded } : {}),
+    })),
     enemies: room.enemies.map((e) => ({
       key: e.key, x: e.pos.x, y: e.pos.y, cx: e.center.x, cy: e.center.y, state: e.state, targetId: e.targetId, hp: e.hp, phase: e.phase, alive: e.alive,
     })),
@@ -883,6 +933,9 @@ function restore(room: CoopRoom, data: PersistedRoom) {
     if (!p) continue; // a snapshot's player who's since left the member list: nothing to restore onto
     p.pos = { x: saved.x, y: saved.y };
     p.hp = saved.hp;
+    // absent in a pre-this-fix snapshot (or a player who was never wiped): stays
+    // null, the same default addPlayer() already gives a fresh RoomPlayer.
+    if (saved.expeditionEnded) p.expeditionEnded = saved.expeditionEnded;
   }
 }
 

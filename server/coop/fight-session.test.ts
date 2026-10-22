@@ -350,21 +350,24 @@ describe("FightSession: a reconnect window timing out (forceFlee)", () => {
     const { session, room } = setup(["p1"], ["west-1"]);
     const r = session.forceFlee("p1", 0, rng(2));
     expect(r.ok).toBe(true);
+    expect(r.left).toBe(true); // solo: resolved immediately within this exact call
     expect(session.ended).toBe("abandoned"); // solo: resolved immediately, nobody left fighting
     expect(room.players.get("p1")!.fightId).toBeNull();
   });
 
-  it("never a free exit: it still takes a full round to resolve, same as a real flee", () => {
+  it("never a free exit: it still takes a full round to resolve, same as a real flee — and this call's own result honestly reports they have NOT left yet", () => {
     const { session } = setup(["p1", "p2"], ["west-1"]);
     const r = session.forceFlee("p1", 0, rng(2));
     expect(r.ok).toBe(true);
+    expect(r.left).toBe(false); // queued only: p2 hasn't readied yet, this call did not resolve anything
     expect(session.ended).toBeNull(); // p2 hasn't readied yet: the round (and p1's departure) hasn't resolved
     expect(session.isMember("p1")).toBe(true); // still structurally present until the round actually resolves
   });
 
   it("resolves alongside a teammate's own action, and doesn't disturb that teammate's own sequence checking", () => {
     const { session } = setup(["p1", "p2"], ["west-1"]);
-    session.forceFlee("p1", 0, rng(2));
+    const forced = session.forceFlee("p1", 0, rng(2));
+    expect(forced.left).toBe(false); // this call itself only queued it — p2 hadn't acted yet
     const r = session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
     expect(r.ok).toBe(true); // both now ready: the round resolves
     expect(session.isMember("p1")).toBe(false); // p1 left (forced flee, survived the round)
@@ -374,6 +377,15 @@ describe("FightSession: a reconnect window timing out (forceFlee)", () => {
     expect(replay.ok).toBe(false);
   });
 
+  it("when the forced player is the LAST unready one, this same call resolves the round and reports left:true", () => {
+    const { session } = setup(["p1", "p2"], ["west-1"]);
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2)); // p2 already ready
+    const r = session.forceFlee("p1", 0, rng(2)); // p1 is now the last unready active player
+    expect(r.ok).toBe(true);
+    expect(r.left).toBe(true); // resolved within this exact call
+    expect(session.isMember("p1")).toBe(false);
+  });
+
   it("a downed or already-fled player can't be force-fled again", () => {
     const { session } = setup(["p1", "p2"], ["west-1"]);
     const fp1 = session.fight.players.find((p) => p.id === "p1")!;
@@ -381,6 +393,7 @@ describe("FightSession: a reconnect window timing out (forceFlee)", () => {
     fp1.downed = true;
     const r = session.forceFlee("p1", 0, rng(2));
     expect(r.ok).toBe(false);
+    expect(r.left).toBeUndefined(); // rejected outright: no departure to report either way
   });
 });
 

@@ -55,6 +55,13 @@ export interface ActionResult {
    * against it, and every card log line names the real card played.
    */
   summary?: { cardName?: string; cardKind?: string; validTargetKey?: string };
+  /**
+   * forceFlee only: whether this exact call actually resolved the player's
+   * departure (true) or merely queued the request pending a teammate's own
+   * action (false/absent). `ok: true` alone never implies this — see
+   * forceFlee's own doc comment.
+   */
+  left?: boolean;
 }
 
 interface PlayerFightState {
@@ -452,6 +459,16 @@ export class FightSession {
    * this round, and they only actually leave once it resolves — but it
    * bypasses the normal per-player sequence check, since this is a
    * server-internal decision, not a replayable client message.
+   *
+   * `ok: true` alone only means the request was accepted (queued); it does
+   * NOT mean the player has left yet — that depends on whether every other
+   * active player was already readied up too (allActiveReady()), which is
+   * about their state, not this call. `left` reports the real outcome:
+   * true only if this exact call's resolveRound (if it ran one) actually
+   * resolved this player's flee — derived from the same justLeft list
+   * ws.ts's own afterFightChange drains for the equivalent live-flee
+   * notification, so "did they actually leave" has one authoritative
+   * answer, not a guess from `ok` alone.
    */
   forceFlee(playerId: string, now: number, rng: () => number): ActionResult {
     if (this.ended) return { ok: false, error: "already ended" };
@@ -460,11 +477,15 @@ export class FightSession {
     if (!ps || !p || p.downed || p.fled) return { ok: false, error: "not an active member" };
     const rp = this.room.players.get(playerId)!;
     this.pendingFlee.add(playerId);
+    let left = false;
     if (!rp.ready) {
       rp.ready = true;
-      if (this.allActiveReady()) this.resolveRound(now, rng);
+      if (this.allActiveReady()) {
+        this.resolveRound(now, rng);
+        left = this.justLeft.includes(playerId);
+      }
     }
-    return { ok: true };
+    return { ok: true, left };
   }
 
   private resolveRound(now: number, rng: () => number) {

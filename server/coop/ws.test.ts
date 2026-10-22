@@ -401,7 +401,7 @@ describe("CoopServer: business logging", () => {
     server.close();
   });
 
-  it("a normal (not downed) reconnect-window timeout still logs result:ok with summary.left true", () => {
+  it("a reconnect-window timeout that only QUEUES (teammate not yet ready) logs queued:true and never claims the player left", () => {
     dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
     const store = openCoopStore(dir);
     store.createRoom("ABC123", 0);
@@ -422,16 +422,289 @@ describe("CoopServer: business logging", () => {
     server.testRegisterSession("ABC123", "f1", session);
     server.testRegisterFakeSocket("ABC123", "p1");
     server.testRegisterFakeSocket("ABC123", "p2");
+    // p2 is never readied: the round genuinely cannot resolve from this call alone.
 
     server.testHandleReconnectTimeout(room, "p1");
 
     const fleeLogs = log.events.filter((ev) => ev.event === "coop.fight.flee");
     expect(fleeLogs).toHaveLength(1);
     expect(fleeLogs[0].result).toBe("ok");
-    expect(fleeLogs[0].summary?.left).toBe(true);
     expect(fleeLogs[0].summary?.forced).toBe(true);
+    expect(fleeLogs[0].summary?.queued).toBe(true);
+    // the player has genuinely NOT left yet: still a member, still in the fight
+    expect(room.players.get("p1")!.fightId).toBe("f1");
+    expect(session.isMember("p1")).toBe(true);
+    // no coop.fight.left record exists yet — nothing has actually resolved
+    expect(log.events.some((ev) => ev.event === "coop.fight.left")).toBe(false);
 
     server.close();
   });
 
+  it("a reconnect-window timeout that resolves the round (teammate already ready) logs queued:false AND a separate coop.fight.left record", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    e.hp = 999; // survives the round so this isn't confused with a won/wiped outcome
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    room.players.get("p1")!.online = false;
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+    // p2 already readied: p1's forceFlee is the last unready active player, so this call resolves the round.
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2));
+
+    server.testHandleReconnectTimeout(room, "p1");
+
+    const fleeLogs = log.events.filter((ev) => ev.event === "coop.fight.flee");
+    expect(fleeLogs).toHaveLength(1);
+    expect(fleeLogs[0].result).toBe("ok");
+    expect(fleeLogs[0].summary?.queued).toBe(false);
+
+    const leftLogs = log.events.filter((ev) => ev.event === "coop.fight.left");
+    expect(leftLogs).toHaveLength(1);
+    expect(leftLogs[0].actorId).toBe("p1");
+    expect(leftLogs[0].summary?.left).toBe(true);
+    expect(room.players.get("p1")!.fightId).toBeNull();
+    expect(session.isMember("p1")).toBe(false);
+
+    server.close();
+  });
+
+  it("an ordinary in-fight Flee click that resolves immediately (last unready player) logs a coop.fight.left record", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    e.hp = 999;
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+    session.applyAction("p2", 1, { type: "endTurn" }, 0, rng(2)); // p2 already ready
+
+    server.testHandleFightAction(room, "p1", 1, { type: "flee" }); // the last unready player: resolves immediately
+
+    const leftLogs = log.events.filter((ev) => ev.event === "coop.fight.left");
+    expect(leftLogs).toHaveLength(1);
+    expect(leftLogs[0].actorId).toBe("p1");
+    expect(leftLogs[0].summary?.left).toBe(true);
+
+    server.close();
+  });
+
+  it("an ordinary in-fight Flee click that only QUEUES (teammate not ready) logs no coop.fight.left record yet", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const log = capturingSink();
+    const server = new CoopServer(dir, store, log);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    room.addPlayer("p2", "Birch", "#000", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    room.players.get("p2")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1", "p2"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    server.testRegisterSession("ABC123", "f1", session);
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testRegisterFakeSocket("ABC123", "p2");
+    // p2 is never readied: the round cannot resolve from this click alone.
+
+    server.testHandleFightAction(room, "p1", 1, { type: "flee" });
+
+    expect(log.events.some((ev) => ev.event === "coop.fight.left")).toBe(false);
+    expect(session.isMember("p1")).toBe(true); // still structurally present, not yet resolved
+
+    server.close();
+  });
+
+});
+
+describe("CoopServer: the expedition-ended panel survives reload/reconnect", () => {
+  it("a real party wipe, committed via tryFinishFight, sets expeditionEnded on the still-present room player", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const server = new CoopServer(dir, store);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    session.fight.players[0].hp = 2; // west-1's shown attack (3 dmg) is lethal this round
+    const r = session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    expect(r.ok).toBe(true);
+    expect(session.ended).toBe("wiped");
+
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, ["p1"]);
+
+    expect(room.players.get("p1")!.expeditionEnded).toBe("wiped");
+    expect(server.testHello(room, "p1").expeditionEnded).toBe("wiped");
+
+    server.close();
+  });
+
+  it("a won fight does NOT set expeditionEnded", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const server = new CoopServer(dir, store);
+    const { room, session, initialMembers } = setupEndedFight(); // this round's existing "wins" helper
+    expect(session.ended).toBe("won");
+
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, initialMembers);
+
+    expect(room.players.get("p1")!.expeditionEnded).toBeNull();
+    expect(server.testHello(room, "p1").expeditionEnded).toBeNull();
+
+    server.close();
+  });
+
+  it("an abandoned fight (everyone fled before a wipe) does NOT set expeditionEnded", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const server = new CoopServer(dir, store);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    const r = session.forceFlee("p1", 0, rng(2)); // solo: resolves immediately as "abandoned", not "wiped"
+    expect(r.ok).toBe(true);
+    expect(session.ended).toBe("abandoned");
+
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, ["p1"]);
+
+    expect(room.players.get("p1")!.expeditionEnded).toBeNull();
+
+    server.close();
+  });
+
+  it("a reconnect (a fresh testHello call) still reports expeditionEnded after it was set", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const server = new CoopServer(dir, store);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    session.fight.players[0].hp = 2;
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, ["p1"]);
+    expect(room.players.get("p1")!.expeditionEnded).toBe("wiped");
+
+    // simulate a reload/reconnect: a second, independent testHello call for the same player
+    const hello1 = server.testHello(room, "p1");
+    const hello2 = server.testHello(room, "p1");
+    expect(hello1.expeditionEnded).toBe("wiped");
+    expect(hello2.expeditionEnded).toBe("wiped"); // still reported, not a one-shot flag
+
+    server.close();
+  });
+
+  it("a brand-new identity joining the SAME room after a wipe is unaffected (no false positive for a late joiner)", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    const server = new CoopServer(dir, store);
+    const room = new CoopRoom("ABC123", 0);
+    room.addPlayer("p1", "Ash", "#fff", 0);
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    session.fight.players[0].hp = 2;
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, ["p1"]);
+    expect(room.players.get("p1")!.expeditionEnded).toBe("wiped");
+
+    room.addPlayer("p2", "Birch", "#000", 0); // joins the same room after the wipe, never part of that fight
+    expect(server.testHello(room, "p2").expeditionEnded).toBeNull();
+
+    server.close();
+  });
+
+  it("the expeditionEnded flag survives a real restart: persisted, then restored by a fresh CoopServer's cold load", () => {
+    dir = mkdtempSync(join(tmpdir(), "cc-coop-ws-"));
+    const store = openCoopStore(dir);
+    store.createRoom("ABC123", 0);
+    store.upsertMember("ABC123", "p1", "Ash", "#fff", 0);
+    const server = new CoopServer(dir, store);
+    const room = server.testGetOrLoadRoom("ABC123")!;
+    const e = room.enemies.find((x) => x.key === "west-1")!;
+    e.state = "engaged";
+    e.fightId = "f1";
+    room.players.get("p1")!.fightId = "f1";
+    const roomFight: RoomFight = { id: "f1", anchorId: "p1", playerIds: ["p1"], enemyKeys: ["west-1"], startedAt: 0 };
+    room.fights.set("f1", roomFight);
+    const session = new FightSession(room, roomFight, rng(1));
+    session.fight.players[0].hp = 2;
+    session.applyAction("p1", 1, { type: "endTurn" }, 0, rng(2));
+    server.testRegisterFakeSocket("ABC123", "p1");
+    server.testAfterFightChange(room, "f1", session, ["p1"]);
+    expect(room.players.get("p1")!.expeditionEnded).toBe("wiped");
+    server.close(); // closes this test's `store` handle too — a real restart reopens the same on-disk file
+
+    // tryFinishFight's own commit already wrote a room_state snapshot as part of
+    // the atomic finishFight transaction (server/coop/store.ts) — confirm a
+    // BRAND NEW CoopServer, with a fresh store handle against the same data
+    // dir, restores the flag purely from that persisted snapshot, exactly
+    // like a real process restart.
+    const server2 = new CoopServer(dir);
+    const reloaded = server2.testGetOrLoadRoom("ABC123")!;
+    expect(reloaded).not.toBe(room); // genuinely a different in-memory object
+    expect(reloaded.players.get("p1")!.expeditionEnded).toBe("wiped");
+    expect(server2.testHello(reloaded, "p1").expeditionEnded).toBe("wiped");
+    server2.close();
+  });
 });
