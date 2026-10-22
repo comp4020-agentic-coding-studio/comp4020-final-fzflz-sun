@@ -156,16 +156,41 @@ five runs; CC attributed the failure to another all-Strike-hand assumption.
 These are recorded local results from before the fixes were committed,
 not checks rerun while updating this overview or proof of their deployment.
 
-Subsequent source review still found queued forced flee logged as already
-left, and an ending panel that is not restored after reload or reconnect.
-The XSS helper also accepts either profile entering combat, rather than
-requiring both. Those gaps remain open; the recorded passing checks do not
-close them.
+Subsequent source review found queued forced flee logged as already left,
+and an ending panel that is not restored after reload or reconnect. The
+XSS helper also accepted either profile entering combat, rather than
+requiring both.
+
+## A real multi-user test session, then closing the remaining gaps
+
+I ran a real [multi-user test session](multi-user-test-report.md) against
+the deployed app at commit
+[c8a4b10](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/c8a4b10).
+[Workflow 39205736108](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/39205736108)
+passed `check` and `deploy` for that exact commit, and the deployed
+revision is `c8a4b10` — this confirms CI and deployment for that commit
+specifically, not every earlier commit in this file's own history.
+`flyctl logs` was exercised directly against the running app and captured
+real coop events corresponding to the driven scenarios (the report's §3),
+closing what an earlier version of this section called "no Fly
+log-stream inspection."
+
+The session found two real gaps the previous follow-up round's own fixes
+had not fully closed (forced-flee logging still conflated "accepted" with
+"actually left"; the wipe panel didn't survive a reload), confirmed a real,
+structural single-machine limitation (scaling to two Fly machines gives
+each its own volume: 11 of 20 real room joins returned 404 — a known,
+accepted shape, not a bug), and separately passed late-join (13/13) and a
+real Fly machine restart mid-fight (7/7). A new
+[stage card](docs/process/2026-10-21-c10-post-fix-verification.md)
+records the fixes for the two real gaps, their real test results, and the
+XSS check's same-fight requirement.
 
 ## Next judgment
 
-Verify the follow-up's CI and deployment separately, correct these remaining
-contracts and check assumptions, then rehearse with two people while narrating from
-logs. No human demo, post-fix author play report or Fly log-stream inspection
-is recorded here. The [C10 reflection](reflections/crit-10.md) remains a
-candidate for author review, not evidence that those observations happened.
+Verify this latest round's own CI and deployment, then rehearse with two
+real people while narrating from logs. That rehearsal — a human playtest,
+not an agent-driven HTTP/WebSocket session — remains the one thing not yet
+recorded anywhere in this file's history. The
+[C10 reflection](reflections/crit-10.md) remains a candidate for author
+review, not evidence that observation has happened.

@@ -79,8 +79,6 @@ first guess, not a tested one.
 
 Not built yet: accounts, loot, talents, art.
 
-<!-- DRAFT (crit 10, awaiting author confirmation): identity/sharing wording
-     below is a first pass, not final. -->
 **Who's who (new, crit 10).** You and a friend are told apart by your
 browser, not an account — joining from the same browser again (even after
 closing the tab) picks up right where you left off, while a different
@@ -91,9 +89,27 @@ link; share it the way you'd share any link. Inside the expedition, you can
 all see each other's position, name and the shared map and fight state —
 but your own hand, and what you're about to play, stays yours alone until
 you play it. *Enforced:* `spec/coop-auth.test.ts`,
-`server/coop/ws.test.ts`, `tools/coop-log-check.mjs`. *Not yet judged by
-play:* a real two-person session, narrated live from the server's own logs
-rather than by looking at the screens.
+`server/coop/ws.test.ts`, `tools/coop-log-check.mjs`, and a real
+[multi-user test session](multi-user-test-report.md) driving two
+independent identities over real HTTP/WebSocket — including against the
+actually deployed app — that confirms two users joining, one's action
+reaching the other without a reload, a late joiner seeing the live room
+without disturbing an in-progress fight (13/13), and the same fight/hand
+surviving a real Fly machine restart (7/7). That session is agent-driven
+(the two "people" are two independent HTTP/WebSocket clients, not two real
+people each in a real browser) — it is evidence the mechanism works, not a
+substitute for a human playtest, which is still outstanding.
+
+<!-- DRAFT (crit 10, awaiting author confirmation): whether the shared-map
+     experience actually feels good to play with a friend needs the
+     author's own judgment; nothing below claims that. -->
+**A known limit.** This app runs as one process on one machine with one
+storage volume by design (`fly.toml`); a room's live state lives in that
+process's memory. The same test session confirmed, by actually scaling the
+Fly app to two machines, that this doesn't scale horizontally: two
+machines get two separate volumes, so a room created on one is invisible
+to the other (11 of 20 real join attempts returned 404). This is a known,
+accepted shape for this project, not a bug to fix.
 
 ## Where these ideas came from
 

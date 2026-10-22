@@ -31,6 +31,9 @@ to identify the actor and accurately describe what actually happened.
 My repeated requests for review and concrete prompts show the workflow I
 want to develop: corrections become useful checks and clear records. I also
 need to distinguish inspection, local reproduction, deployment evidence and
-human judgment. The earlier C10 build passed CI; the follow-up needs separate
-CI and deployment verification. A real two-person session narrated from its
-logs remains outstanding.
+human judgment. A real multi-user test session (agent-driven: two
+independent HTTP/WebSocket identities, not two people each in a real
+browser) has now verified CI, deployment and a real Fly restart for commit
+c8a4b10, and found two further gaps this latest round closed. A real
+two-person session narrated from its logs — the one kind of evidence none
+of this replaces — remains outstanding.
