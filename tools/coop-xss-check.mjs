@@ -163,7 +163,9 @@ async function walkTogether(tabs, target, maxIters = 60) {
   const heldSets = tabs.map(() => new Set());
   const results = await Promise.all(tabs.map((t, i) => steerToward(t, target, heldSets[i], maxIters)));
   await Promise.all(tabs.map((t, i) => releaseAll(t, heldSets[i])));
-  return results.some(Boolean);
+  // every tab, not merely one — two tabs each entering their OWN separate
+  // fight would satisfy "some", which is not "a shared fight" at all.
+  return results.every(Boolean);
 }
 
 // A payload that, if ever actually parsed as an element and executed, logs a
@@ -195,6 +197,13 @@ async function main() {
   // steerToward(), the same fix applied here).
   const started = await walkTogether([attacker, victim], { x: 640, y: 380 });
   check(started, "both players enter a shared fight");
+  // "both entered combat" alone would also be true of two separate solo
+  // fights — confirm it's genuinely the SAME fight, which is what the rest
+  // of this scenario (the attacker's name reaching the victim's shared
+  // fight view) actually depends on.
+  const attackerFight = (await attacker.state())?.fight;
+  const victimFight = (await victim.state())?.fight;
+  check(!!attackerFight && !!victimFight && attackerFight.fightId === victimFight.fightId, "both players are in the SAME fight, not two separate ones");
 
   await sleep(500);
   // wait up to a few rounds for the enemy's shown intent to actually target the attacker
