@@ -1,9 +1,13 @@
 # Art sample and asset record
 
-Status (30 October 2026): one agent-reviewed sample exists on branch
-`cc/art-sample` (recorded below). It has not been reviewed by the author or by
-a player, is not merged or deployed, and is not a full art set. The workflow
-and templates below still govern any expansion.
+Status (30 October 2026): one art sample (recorded below) is merged to `main`
+in merge commit `a2f7a0c` and deployed. CI
+[run 41050641974](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41050641974)
+passed `check` and `deploy` for that commit. The only review is an agent review
+by Claude Code; the author then asked for it to be merged and deployed. No
+author screenshot review, author playtest or player review is recorded. It is
+a first sample, not a full art set. The workflow and templates below still
+govern any expansion.
 
 ## Review one playable sample first
 
@@ -208,8 +212,8 @@ All against the local dev server on :8080 unless noted, 30 October 2026:
 - Page exceptions / console errors captured over CDP in every screenshot run:
   none.
 
-Not run: a production Docker image build, a Fly deploy, or any check against
-the deployed app. This branch is not merged.
+Not run before the merge: a local production Docker image build. CI built
+and checked the production image instead (see "Deployment" below).
 
 ### Asset record
 
@@ -223,11 +227,46 @@ the deployed app. This branch is not merged.
 | Editable source | The runtime files themselves (plain SVG text). |
 | Export recipe | None. Vite imports each SVG with `?raw`; `sprites.ts` scales its width/height by 4 and passes it to Kaplay `loadSprite` as a data URL, which Kaplay rasterises once at load. |
 | Logical size / anchor | player 32x32, grunt 28x28, elite 40x40, boss 56x56, ground 130x130 (= `GROUND_TILE`). Centre anchor. viewBox equals logical size; drawn with explicit `width`/`height` equal to logical size. Never used for collision, click area, footprint, formation or save. |
-| Acceptance evidence | Agent sample review above, 30 October 2026. Not yet accepted by the author. |
+| Acceptance evidence | Agent sample review above, 30 October 2026, on code `b76d406`. Merged in `a2f7a0c` at the author's request and deployed by CI run 41050641974 the same day. No author or player review of the art itself is recorded. |
 
 ### Reviewed implementation commits
 
 - `b76d406` — the five SVGs, `src/art/sprites.ts`, and the rendering changes
   in `src/main.ts` / `src/coop-main.ts`. The review above was made on this
   code (uncommitted at review time, on top of `b7665ec`).
-- (next commit) — this record.
+- `f2bfcb2` — this record's first version.
+- `9a6c77e` — README screenshots (`docs/fight-desktop.png`,
+  `docs/fight-phone.png`) replaced with fresh captures of the sample, taken
+  from `f2bfcb2` on the local dev server; alt text and the "not built yet"
+  line updated.
+- `a2f7a0c` — merge of `cc/art-sample` into `main` (`--no-ff`).
+- (the commit after the merge) — this status and deployment record.
+
+### Deployment
+
+Merged to `main` as `a2f7a0c` and pushed; CI
+[run 41050641974](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41050641974)
+passed `check` (production image build plus the full suite, including the
+browser, co-op, XSS, logging and wipe checks) and `deploy`.
+
+Checked against the deployed app on 30 October 2026:
+
+- `pnpm check:deploy -- https://comp4020-final-fzflz-sun.fly.dev`: `ok: true`.
+  Its `sourceRevision` (`a2f7a0c`) describes the checking checkout, not the
+  server, so it was not taken as proof of the deployed code. Server-returned
+  evidence instead: the deployed app serves `world-C5ncGKK8.js` and
+  `main-DzyLQiXw.js`, the same fingerprints as a local `pnpm build` of this
+  code; the deployed `world-*.js` contains all five SVGs; both deployed
+  README images are byte-identical (SHA-256) to the tracked files; the
+  deployed README serves the new "not built yet" line and none of the old
+  alt text.
+- `node tools/coop-live-check.mjs <deployed>`: 27/27, first run.
+- `node tools/coop-wipe-check.mjs <deployed>`: 18/18, both viewports, first
+  run, including reload after a wipe, no page errors.
+- `/` and `/readme/` in headless Chrome at 1920x1080 and 390x844: both README
+  images load at their new sizes; a real run starts (16 enemies, server save
+  confirmed) with the sprites drawn; no page or console errors. The
+  disposable visitors were erased afterwards.
+
+The repeating ground band is clearly visible on the deployed exploration view,
+as recorded above; it remains an adapt item.
