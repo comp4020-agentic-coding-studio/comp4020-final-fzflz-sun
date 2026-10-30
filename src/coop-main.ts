@@ -1,4 +1,5 @@
 import kaplay from "kaplay";
+import { loadArt, ROLE_SPRITE } from "./art/sprites.ts";
 import { escapeHtml, escapeKaplayText, type CoopClientMsg, type CoopFightMsg, type CoopHandMsg, type CoopServerMsg } from "./coop-protocol.ts";
 import { PLAYER_JOIN_RADIUS } from "./encounter.ts";
 import { formationBounds, layoutFormation, planCamera, type Unit as FormationUnit, type V, type Viewport } from "./formation.ts";
@@ -109,6 +110,7 @@ async function startJoinFlow() {
 
 const k = kaplay({ root: $("game"), background: [17, 17, 17], pixelDensity: Math.min(window.devicePixelRatio || 1, 2), global: false });
 k.setGravity(0);
+loadArt(k);
 
 const ROLE_COLOR: Record<string, ReturnType<typeof k.rgb>> = {
   brute: k.rgb(220, 70, 70),
@@ -122,8 +124,9 @@ const ROLE_SIZE: Record<string, number> = { brute: 28, swarm: 20, mage: 24, heav
 const GROUND_TILE = 130;
 for (let gy = 0; gy < WORLD_HEIGHT; gy += GROUND_TILE) {
   for (let gx = 0; gx < WORLD_WIDTH; gx += GROUND_TILE) {
-    const dark = ((gx / GROUND_TILE + gy / GROUND_TILE) | 0) % 2 === 0;
-    k.add([k.rect(GROUND_TILE, GROUND_TILE), k.pos(gx, gy), k.color(dark ? 26 : 30, dark ? 26 : 30, dark ? 30 : 34), k.z(-100)]);
+    const i = gx / GROUND_TILE, j = gy / GROUND_TILE;
+    // same tile and flip pattern as src/main.ts, anchored at the cell centre
+    k.add([k.sprite("ground", { width: GROUND_TILE, height: GROUND_TILE, flipX: (i + j) % 2 === 1, flipY: (i * 3 + j) % 4 >= 2 }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
   }
 }
 for (const a of AREAS) {
@@ -158,16 +161,30 @@ function coopViewport(): Viewport {
 
 // ---------- entities, driven entirely by server snapshots ----------
 
+// Bodies keep their logical shape (circle 16 / role-sized square, centre
+// anchor) but draw no fill; art is a child pinned to exactly that size, so
+// decorative bounds never leak into positions, formation or anything sent
+// to the server. The player sprite is drawn in light neutrals so color()
+// tints it to each member's own colour.
 function makePlayerBody(color: ReturnType<typeof k.rgb>) {
-  return k.add([k.circle(16), k.pos(0, 0), k.color(color), k.opacity(1), k.anchor("center"), k.z(10)]);
+  const body = k.add([k.circle(16, { fill: false }), k.pos(0, 0), k.color(color), k.opacity(1), k.anchor("center"), k.z(10)]);
+  body.add([k.sprite("player", { width: 32, height: 32 }), k.anchor("center"), k.color(color), k.opacity(1), "art"]);
+  return body;
+}
+/** Sets a body's opacity and its art child's, if it has one. */
+function setBodyOpacity(body: { opacity: number; get: (tag: string) => unknown[] }, o: number) {
+  body.opacity = o;
+  const art = body.get("art")[0] as { opacity: number } | undefined;
+  if (art) art.opacity = o;
 }
 function makeLabel(text: string, y: number) {
   return k.add([k.text(text, { size: 12 }), k.pos(0, y), k.anchor("center"), k.color(230, 230, 230), k.z(11)]);
 }
 function makeEnemyBody(role: string, tier: string) {
   const size = ROLE_SIZE[role] ?? 24;
-  return k.add([
-    k.rect(size, size),
+  const art = ROLE_SPRITE[role];
+  const body = k.add([
+    k.rect(size, size, { fill: !art }),
     k.pos(0, 0),
     k.color(ROLE_COLOR[role] ?? k.rgb(200, 200, 200)),
     ...(tier === "elite" ? [k.outline(3, k.rgb(240, 200, 80))] : []),
@@ -175,6 +192,8 @@ function makeEnemyBody(role: string, tier: string) {
     k.anchor("center"),
     k.z(5),
   ]);
+  if (art) body.add([k.sprite(art, { width: size, height: size }), k.anchor("center"), k.opacity(1), "art"]);
+  return body;
 }
 
 // ---------- position smoothing: the server only broadcasts a `state`
@@ -316,7 +335,7 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     seenP.add(p.id);
     const v = ensurePlayer(p.id, p.name, p.color, p.x, p.y);
     pushSnap(v.buf, { t: now, x: p.x, y: p.y });
-    v.body.opacity = p.online ? (p.fightId ? 0.6 : 1) : 0.3;
+    setBodyOpacity(v.body, p.online ? (p.fightId ? 0.6 : 1) : 0.3);
     const tag = !p.online ? " (away)" : p.fightId ? " (in combat)" : "";
     const label = `${escapeKaplayText(p.name)}${tag}`;
     if (v.label.text !== label) v.label.text = label;
@@ -351,7 +370,7 @@ function applyState(msg: CoopServerMsg & { type: "state" }) {
     pushSnap(v.buf, { t: now, x: e.x, y: e.y });
     const hpText = e.fightId ? `${e.hp} ⚔` : `${e.hp}`;
     if (v.hpLabel.text !== hpText) v.hpLabel.text = hpText;
-    v.body.opacity = e.fightId ? 0.5 : 1; // combat itself (phase 3) will replace this with the real fight screen
+    setBodyOpacity(v.body, e.fightId ? 0.5 : 1); // combat itself (phase 3) will replace this with the real fight screen
   }
   for (const [id, v] of enemies) {
     if (!seenE.has(id)) {
