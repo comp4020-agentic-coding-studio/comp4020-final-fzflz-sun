@@ -270,3 +270,13 @@ Checked against the deployed app on 30 October 2026:
 
 The repeating ground band is clearly visible on the deployed exploration view,
 as recorded above; it remains an adapt item.
+
+CI run 41051496195, for the commit that added this deployment record
+(`fb5a75d`, a docs-only change), failed in `tools/coop-live-check.mjs`
+scenario 5, so that commit was not deployed. The cause was in the check, not
+the art or the game: when B's opening hand has no Strike (about 12.6% of
+deals) B cannot kill west-1 in the first round, and the absent-but-active
+player correctly blocks the round from resolving until their reconnect window
+ends. The check now forms a fresh fight until B holds a Strike, before anything
+under test happens, and uses the server's `lastSeq`. That fix and its
+verification are in the following commit.

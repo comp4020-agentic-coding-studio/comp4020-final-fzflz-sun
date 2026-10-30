@@ -370,13 +370,32 @@ async function scenarioStaleFightEndedDoesNotWipeNewFight() {
 // ---------- scenario 5: A disconnects mid-fight; B finishes it while A is away; A reconnects within the window ----------
 async function scenarioReconnectAfterFightConcludedWhileAway() {
   console.log("\n# scenario 5: A disconnects mid-fight; the fight concludes entirely while A is away; A reconnects within the 30s window");
-  const host = await createRoom("Live-Away-A");
-  const guest = await joinRoom(host.code, "Live-Away-B");
-  const a = await connect(host.code, host.cookie);
-  const b = await connect(host.code, guest.cookie);
-  await sleep(200);
-  await walkIntoFight(a, b, "scenario5");
-  const fightId = last(a, "fight").fightId;
+  // Precondition, checked BEFORE anything under test happens: B's opening hand
+  // must hold a Strike (6 dmg), because B has to kill west-1 (6 HP) inside this
+  // first round. A disconnects without readying up, so A stays an active member
+  // and the round cannot resolve until A's 30s reconnect window ends (correct
+  // game behaviour, server/coop/fight-session.ts allActiveReady) — B can't reach
+  // a second round. A 4-card hand from the 14-card deck has no Strike about
+  // 12.6% of the time (C(9,4)/C(14,4)), which is exactly what failed in CI run
+  // 41051496195. If the dealt hand can't satisfy the precondition, form a fresh
+  // room and fight (bounded), rather than letting the scenario fail on a hand it
+  // could never win with.
+  let host, a, b, fightId;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    host = await createRoom("Live-Away-A");
+    const guest = await joinRoom(host.code, "Live-Away-B");
+    a = await connect(host.code, host.cookie);
+    b = await connect(host.code, guest.cookie);
+    await sleep(200);
+    await walkIntoFight(a, b, "scenario5");
+    const hand = last(b, "hand");
+    if (hand?.cards.some((c) => c.kind === "single" && c.value >= 6 && c.cost <= hand.energy)) break;
+    console.log(`  (attempt ${attempt}: B's opening hand has no Strike — ${JSON.stringify(hand?.cards.map((c) => c.name))} — re-forming the fight)`);
+    a.ws.close();
+    b.ws.close();
+    if (attempt === 6) throw new Error("scenario5: could not deal B a hand with a Strike in 6 fresh fights");
+  }
+  fightId = last(a, "fight").fightId;
 
   // A disconnects WITHOUT fleeing — a real "closed the tab mid-fight" scenario, distinct
   // from an explicit flee. The server has no way to know A meant to leave; only a timeout
@@ -388,26 +407,18 @@ async function scenarioReconnectAfterFightConcludedWhileAway() {
   // the real "no catch-up message exists for a fight that's already gone" gap: the server
   // has nothing fight-specific to send a reconnecting A (no fight/fightEnded/leftFight for
   // a fight nobody can look up anymore), so hello's own fightId field must carry this.
-  let killed = false;
-  for (let i = 0; i < 6 && !killed; i++) {
-    const hand = last(b, "hand");
-    const fight = last(b, "fight");
-    if (!hand || !fight || last(b, "fightEnded")) {
-      killed = !!last(b, "fightEnded");
-      break;
-    }
-    const enemy = fight.enemies.find((e) => !e.downed);
-    const strike = hand.cards.find((c) => c.kind === "single" && c.value >= (enemy?.hp ?? Infinity));
-    if (strike && enemy) {
-      b.ws.send(JSON.stringify({ type: "playCard", seq: i + 1, cardInstanceId: strike.id, targetKey: enemy.key }));
-    } else {
-      const card = hand.cards.find((c) => c.cost <= hand.energy && c.kind !== "single") ?? hand.cards.find((c) => c.cost <= hand.energy);
-      if (card) b.ws.send(JSON.stringify({ type: "playCard", seq: i + 1, cardInstanceId: card.id, targetKey: card.kind === "single" ? enemy?.key : undefined }));
-      else b.ws.send(JSON.stringify({ type: "endTurn", seq: i + 1 }));
-    }
-    await sleep(300);
-  }
-  check(!!last(b, "fightEnded"), "B alone concluded the fight while A was disconnected");
+  // The precondition above guarantees B a Strike; play it on the standing enemy
+  // with the server's own next seq (CoopHandMsg.lastSeq + 1), not a guessed one,
+  // then wait for the real fightEnded rather than a fixed sleep.
+  const hand = last(b, "hand");
+  const enemy = last(b, "fight")?.enemies.find((e) => !e.downed);
+  const strike = hand.cards.find((c) => c.kind === "single" && c.value >= (enemy?.hp ?? Infinity) && c.cost <= hand.energy);
+  if (strike && enemy) b.ws.send(JSON.stringify({ type: "playCard", seq: hand.lastSeq + 1, cardInstanceId: strike.id, targetKey: enemy.key }));
+  for (let i = 0; i < 20 && !last(b, "fightEnded"); i++) await sleep(150);
+  check(
+    !!last(b, "fightEnded"),
+    `B alone concluded the fight while A was disconnected${last(b, "fightEnded") ? "" : ` (enemy ${JSON.stringify(enemy)}, hand ${JSON.stringify(hand?.cards.map((c) => c.name))}, last error ${JSON.stringify(last(b, "actionError"))})`}`,
+  );
 
   // A reconnects within the window (well before the 30s reconnect-timeout would otherwise fire)
   const a2 = await connect(host.code, host.cookie);
