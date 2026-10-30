@@ -1,4 +1,5 @@
 import kaplay from "kaplay";
+import { loadArt, ROLE_SPRITE } from "./art/sprites.ts";
 import {
   HAND_SIZE,
   type CardDef,
@@ -149,6 +150,7 @@ const k = kaplay({
   debug: DEV,
 });
 k.setGravity(0);
+loadArt(k);
 
 type Color = ReturnType<typeof k.rgb>;
 const PLAYER_COLOR = k.rgb(80, 160, 255);
@@ -202,9 +204,11 @@ function placeOverflowPanel() {
 
 // ---------- player / run state ----------
 
+// The circle stays the logical body (area, anchor, size); the art is a child
+// drawn at exactly that size, so decorative bounds never become collision.
 const player = k.add([
   k.pos(PLAYER_START.x, PLAYER_START.y),
-  k.circle(16),
+  k.circle(16, { fill: false }),
   k.color(PLAYER_COLOR),
   k.area(),
   k.anchor("center"),
@@ -212,6 +216,7 @@ const player = k.add([
   "player",
   { hp: PLAYER_MAX_HP, energy: PLAYER_MAX_ENERGY, block: 0 },
 ]);
+const playerArt = player.add([k.sprite("player", { width: 32, height: 32 }), k.anchor("center"), k.color(PLAYER_COLOR)]);
 
 /**
  * A live view of the one Kaplay player entity, shaped like combat.ts's
@@ -281,15 +286,17 @@ function floatText(pos: Vec2, msg: string, color: Color) {
 const GROUND_TILE = 130;
 for (let gy = 0; gy < WORLD_HEIGHT; gy += GROUND_TILE) {
   for (let gx = 0; gx < WORLD_WIDTH; gx += GROUND_TILE) {
-    const dark = ((gx / GROUND_TILE + gy / GROUND_TILE) | 0) % 2 === 0;
-    k.add([k.rect(GROUND_TILE, GROUND_TILE), k.pos(gx, gy), k.color(dark ? 26 : 30, dark ? 26 : 30, dark ? 30 : 34), k.z(-100)]);
+    const i = gx / GROUND_TILE, j = gy / GROUND_TILE;
+    // anchored at the tile centre so flips stay inside the same cell
+    k.add([k.sprite("ground", { width: GROUND_TILE, height: GROUND_TILE, flipX: (i + j) % 2 === 1, flipY: (i * 3 + j) % 4 >= 2 }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
   }
 }
 for (const p of [
   { x: 300, y: 300 }, { x: 1100, y: 200 }, { x: 400, y: 1100 },
   { x: 1500, y: 800 }, { x: 2050, y: 330 }, { x: 860, y: 780 },
 ]) {
-  k.add([k.circle(34), k.pos(p.x, p.y), k.color(45, 55, 45), k.z(-90)]);
+  k.add([k.circle(38), k.pos(p.x, p.y), k.color(30, 36, 28), k.z(-91)]);
+  k.add([k.circle(30), k.pos(p.x, p.y), k.color(52, 64, 46), k.z(-90)]);
 }
 
 // Camp names on the ground, so "camps cleared" points at somewhere real.
@@ -327,9 +334,12 @@ function spawnEnemy(spec: SpawnSpec) {
   const g = spec.group ? GROUP_BY_ID.get(spec.group) : undefined;
   const lab = def.tier === "boss" ? LABELS.boss : def.tier === "elite" ? LABELS.elite : LABELS.unit;
   const enemyId = nextEnemyId++; // runtime only; saves use spawnId
+  const art = ROLE_SPRITE[spec.role];
   const enemy = k.add([
     k.pos(spec.x, spec.y),
-    k.rect(size, size),
+    // With art, the rect stays the logical body (area, anchor, outlines) but
+    // draws no fill; the sprite child is pinned to exactly the same size.
+    k.rect(size, size, { fill: !art }),
     k.color(ROLE_COLOR[spec.role]),
     // Elites always wear a gold outline. Others get one only while their pack's
     // hint shows: Kaplay draws an outline of width 0 (or opacity 0) anyway, so
@@ -375,6 +385,8 @@ function spawnEnemy(spec: SpawnSpec) {
       labels: lab,
     },
   ]);
+  // added before the labels so HP / intent / tag text draws above the art
+  if (art) enemy.add([k.sprite(art, { width: size, height: size }), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyArt"]);
   enemy.add([k.text(String(spec.hp), { size: def.tier === "boss" ? 16 : 13 }), k.pos(0, lab.hp), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyHpLabel"]);
   enemy.add([k.text("", { size: 14, align: "center" }), k.pos(0, lab.intent), k.anchor("center"), k.color(255, 210, 80), k.opacity(1), "enemyStateLabel"]);
   if (def.tier === "elite") enemy.add([k.text("ELITE", { size: 12 }), k.pos(0, lab.tag), k.anchor("center"), k.color(GOLD), k.opacity(1), "enemyTagLabel"]);
@@ -445,22 +457,36 @@ function refreshIntentLabel(e: Enemy) {
   label.color = e.unit.downed ? k.rgb(150, 230, 150) : e.acted ? k.rgb(120, 120, 120) : k.rgb(255, 210, 80);
 }
 
+const artOf = (e: Enemy) => e.get("enemyArt")[0] as unknown as { color: Color; opacity: number } | undefined;
+
+/**
+ * Body tint: the art child when the role has a sprite, else the rect. A sprite
+ * is drawn in its own colours, so "normal" is white; color() multiplies and
+ * can't brighten, so a hit on a sprite flashes as a cold blue-white instead.
+ * Opacity is owned by the per-frame dimming loop, not set here.
+ */
+function tintBody(e: Enemy, mode: "normal" | "down" | "hit") {
+  const art = artOf(e);
+  if (art) art.color = mode === "down" ? k.rgb(110, 110, 116) : mode === "hit" ? k.rgb(150, 190, 255) : k.rgb(255, 255, 255);
+  else e.color = mode === "down" ? DOWN_COLOR : mode === "hit" ? k.rgb(255, 255, 255) : ROLE_COLOR[e.role];
+}
+
 function showDowned(e: Enemy, down: boolean) {
-  e.color = down ? DOWN_COLOR : ROLE_COLOR[e.role];
+  tintBody(e, down ? "down" : "normal");
   refreshHpLabel(e);
   refreshIntentLabel(e);
 }
 
 function flash(e: Enemy) {
-  e.color = k.rgb(255, 255, 255);
+  tintBody(e, "hit");
   k.wait(HIT_FLASH_DURATION, () => {
-    if (e.exists()) e.color = e.unit.downed ? DOWN_COLOR : ROLE_COLOR[e.role];
+    if (e.exists()) tintBody(e, e.unit.downed ? "down" : "normal");
   });
 }
 function flashPlayer() {
-  player.color = k.rgb(255, 90, 90);
+  playerArt.color = k.rgb(255, 90, 90);
   k.wait(HIT_FLASH_DURATION, () => {
-    player.color = PLAYER_COLOR;
+    playerArt.color = PLAYER_COLOR;
   });
 }
 
@@ -1528,7 +1554,7 @@ function startFromSave(save: SaveData, restored: boolean) {
   player.hp = save.player.hp;
   player.energy = PLAYER_MAX_ENERGY;
   player.block = 0;
-  player.color = PLAYER_COLOR;
+  playerArt.color = PLAYER_COLOR;
   piles = newPiles();
   encounterCooldownUntil = k.time() + LOAD_IMMUNITY;
   runState = save.outcome === "playing" ? "playing" : save.outcome;
@@ -1737,7 +1763,7 @@ k.onUpdate(() => {
     const inFight = !!cur && cur.roster.includes(e);
     const o = !cur ? 1 : inFight ? (e.overflow ? 0 : e.unit.downed ? 0.45 : 1) : 0.3;
     e.opacity = o;
-    for (const tag of ["enemyHpLabel", "enemyStateLabel", "enemyTagLabel", "enemyGlyph"]) {
+    for (const tag of ["enemyArt", "enemyHpLabel", "enemyStateLabel", "enemyTagLabel", "enemyGlyph"]) {
       const l = labelOf(e, tag);
       if (l) l.opacity = inFight && e.unit.downed && tag === "enemyStateLabel" ? 1 : o;
     }

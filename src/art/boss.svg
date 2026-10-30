@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">
+  <!-- Warlord (boss), original. Crowned bulk with a banner pole. -->
+  <ellipse cx="28" cy="51" rx="20" ry="4" fill="#000" opacity="0.4"/>
+  <path d="M44 6 L44 48" stroke="#121212" stroke-width="4" stroke-linecap="round"/>
+  <path d="M44 6 L44 48" stroke="#8a6a3a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M44 7 L54 10 L44 15 Z" fill="#f0c850" stroke="#121212" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M8 49 L9 28 C9 21 16 18 26 18 C36 18 41 21 41 28 L42 49 Z" fill="#a03cc8" stroke="#121212" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M15 49 L17 30 L35 30 L37 49 Z" fill="#6a2488" opacity="0.8"/>
+  <circle cx="25" cy="14" r="9" fill="#a03cc8" stroke="#121212" stroke-width="2.5"/>
+  <path d="M16 9 L17 2 L21 6 L25 0.8 L29 6 L33 2 L34 9 Z" fill="#f0c850" stroke="#121212" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M20 14 L23.5 15.5 M30 14 L26.5 15.5" stroke="#121212" stroke-width="2.2" stroke-linecap="round"/>
+  <circle cx="25" cy="38" r="3.5" fill="#f0c850" stroke="#121212" stroke-width="1.5"/>
+  <path d="M12 26 C14 22 18 20.5 22 20.2" stroke="#fff" stroke-width="1.6" fill="none" opacity="0.45"/>
+</svg>
