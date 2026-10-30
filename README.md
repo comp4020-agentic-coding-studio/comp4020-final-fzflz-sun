@@ -4,7 +4,7 @@ A small card-battle trek for a handful of friends: walk the map, choose which
 enemies to pull into each fight, read their next move, and play your hand.
 Your run is kept on the server for your browser, no account needed.
 
-![A mage fight: the mage shows REVIVE +3 and the fallen grunt shows it is the target](docs/fight-desktop.png)
+![A desktop fight against the crowned Warlord, four shield-bearing grunts and a swarmling: each enemy shows its HP and its next attack (ATK 5 on the Warlord, ATK 3 on the grunts), the yellow marker is on the Warlord, and the hooded explorer stands to the right](docs/fight-desktop.png)
 
 ## Who it's for
 
@@ -47,7 +47,7 @@ later, and think unhurried.
    text that stays readable. *Judged, with checks:* `tools/playtest.mjs`
    plays with touch at 390x844.
 
-![The captain's pack on a 390x844 phone: the gold-outlined ELITE and its escort, hand below](docs/fight-phone.png)
+![The same Warlord fight on a 390x844 phone: every enemy's HP and next attack stay readable above its body, with End turn, Flee and the hand below](docs/fight-phone.png)
 
 ## This version
 
@@ -77,7 +77,7 @@ pass/fail test) with `tools/coop-perf-check.mjs`. *Not yet judged by play*:
 which player an unaimed attack picks (currently the lowest-HP one) is a
 first guess, not a tested one.
 
-Not built yet: accounts, loot, talents, art.
+Not built yet: accounts, loot, talents; the art is a first sample, not a full set.
 
 **Who's who (new, crit 10).** You and a friend are told apart by your
 browser, not an account — joining from the same browser again (even after
