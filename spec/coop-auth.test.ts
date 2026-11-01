@@ -334,10 +334,27 @@ describe("coop identity and authorization", () => {
     const { card: affordable, targetKey } = pickAffordableCard(handB, bFight, room.code);
     const errorCountBefore = b.msgs.filter((m) => m.type === "actionError").length;
     const handCountBefore = b.msgs.filter((m) => m.type === "hand").length;
+    const endedBefore = b.msgs.filter((m) => m.type === "fightEnded").length;
     b.send({ type: "playCard", seq: 1, cardInstanceId: affordable.id, targetKey });
-    const bHandAfter = await waitForNext(b, "hand", handCountBefore, "B's legitimate play after A's rejected action");
-    expect(bHandAfter.energy).toBe(bEnergyBefore - affordable.cost + (affordable.kind === "resource" ? 1 : 0));
-    expect(bHandAfter.cards.length).toBe(affordable.kind === "resource" ? bHandCountBefore : bHandCountBefore - 1);
+    // B's play succeeding shows up one of two ways. Usually the fight goes on and
+    // B gets a new hand. But when B's hand holds only Strikes, the fallback above
+    // plays one at west-1, and Strike (6) kills west-1 (6 HP): the fight ends and
+    // the server sends fightEnded "won" instead of a new hand. That is B's action
+    // succeeding too (CI run 41296742443 failed by waiting only for a hand).
+    for (let i = 0; i < 40; i++) {
+      if (b.msgs.filter((m) => m.type === "hand").length > handCountBefore) break;
+      if (b.msgs.filter((m) => m.type === "fightEnded").length > endedBefore) break;
+      await sleep(50);
+    }
+    const ended = b.msgs.filter((m) => m.type === "fightEnded").slice(endedBefore);
+    if (ended.length) {
+      expect(affordable.kind).toBe("single"); // only a Strike can end it in one play
+      expect(ended[0].outcome).toBe("won");
+    } else {
+      const bHandAfter = await waitForNext(b, "hand", handCountBefore, "B's legitimate play after A's rejected action");
+      expect(bHandAfter.energy).toBe(bEnergyBefore - affordable.cost + (affordable.kind === "resource" ? 1 : 0));
+      expect(bHandAfter.cards.length).toBe(affordable.kind === "resource" ? bHandCountBefore : bHandCountBefore - 1);
+    }
     expect(b.msgs.filter((m) => m.type === "actionError").length).toBe(errorCountBefore);
 
     a.ws.close();

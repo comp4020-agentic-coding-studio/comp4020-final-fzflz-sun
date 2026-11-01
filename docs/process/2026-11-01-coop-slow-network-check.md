@@ -88,6 +88,19 @@ movement adds the time to travel 40 px.
 | Early latencies were optimistic (a Guard "reached" B in 5 ms) | A message already in flight was counted as the response. The check now matches content: A's block in B's own view, and a 40 px move from a fresh baseline | Numbers above |
 | Slow 3G shared fight formed 4 of 6 times | Diagnostics showed both enemies chasing but players stopping about 100 px short: steering used the client's predicted position, about 60 px ahead of the server's on a 400 ms link. Now steers from the server's position toward west-1's current position | 6 of 6 |
 
+## Unrelated CI failure found on the way
+
+CI run 41296742443, for the merge that added this check, failed in
+`spec/coop-auth.test.ts` ("after a rejected action, the legitimate player can
+still act normally"), not in anything this check touches. When B's hand held
+only Strikes, the test played one at west-1; Strike (6) kills west-1 (6 HP), so
+the fight ended and the server sent `fightEnded` instead of the new `hand` the
+test waited for. B's action had succeeded; the test read the wrong signal. A
+throwaway harness against the real `FightSession` confirmed an all-Strike
+fallback ends the fight as `won`. The test now accepts either a correct new
+hand or that win, and still requires no `actionError` for B. It passed 10 of
+10 locally afterwards.
+
 ## Limits
 
 - Local loopback with simulated latency and bandwidth, not a real mobile
