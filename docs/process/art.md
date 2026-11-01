@@ -312,7 +312,7 @@ size; the style contract above is unchanged.
 
 ```text
 Date / reviewer / build commit: 1 November 2026 / Claude Code (agent), not
-  the author or a player / reviewed on top of ef21561 (commit below).
+  the author or a player / reviewed on top of ef21561; reviewed code is commit aedc011.
 Sample assets / style contract: grunt.svg (redrawn), ground.svg (redrawn),
   ground-b.svg, mage.svg, swarm.svg, plus generated flash silhouettes;
   contract unchanged.
