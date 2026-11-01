@@ -1,6 +1,6 @@
 # Process overview — Crit 10
 
-Updated 1 November 2026 (Australia/Sydney), from repository state 69393e2.
+Updated 1 November 2026 (Australia/Sydney), from repository state e1fc82c.
 This account is drawn from the repository and my record of the work.
 Automated checks are identified separately from human play.
 
@@ -152,6 +152,18 @@ fixed the check rather than retrying it, and
 [workflow 41053381096](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41053381096)
 passed and deployed `ba7971b`. A verifier's `sourceRevision` describes its
 local checkout, so deployment was also confirmed from the served assets.
+
+A slow-network check
+([a8f8bfa](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/a8f8bfa),
+[record](docs/process/2026-11-01-coop-slow-network-check.md)) ran three times
+against a local production build: on Fast 3G, movement took about 0.53–0.61 s
+and a round about 0.49 s; on Slow 3G, 1.02–1.12 s and 1.00–1.04 s; reconnects
+took 3.33–3.90 s. It found no app bug; it is a local simulation, not a real
+mobile network, and is not in CI. An art polish
+([aedc011](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/aedc011), merged in
+[e1fc82c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/e1fc82c)) added a bolder grunt,
+non-repeating ground, a white hit flash and mage and swarmling sprites, and
+updated the README screenshots. No author or player has reviewed the art.
 
 ## Next judgment
 

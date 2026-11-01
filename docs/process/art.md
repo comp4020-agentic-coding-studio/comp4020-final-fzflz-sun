@@ -1,13 +1,16 @@
 # Art sample and asset record
 
-Status (30 October 2026): one art sample (recorded below) is merged to `main`
-in merge commit `a2f7a0c` and deployed. CI
+Status (1 November 2026): the polish pass (below) is merged to `main` in merge
+commit `e1fc82c` and deployed; CI
+[run 41298084435](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41298084435)
+passed `check` and `deploy` for that commit. It completes the first sample's
+adapt items and draws the two remaining roles. History: the first art sample
+was merged in `a2f7a0c` and deployed by CI
 [run 41050641974](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41050641974)
-passed `check` and `deploy` for that commit. The only review is an agent review
-by Claude Code; the author then asked for it to be merged and deployed. No
-author screenshot review, author playtest or player review is recorded. It is
-a first sample, not a full art set. The workflow and templates below still
-govern any expansion.
+on 30 October 2026. Both were reviewed by Claude Code (agent) only; the author
+asked for them to be merged and deployed. No author screenshot review, author
+playtest or player review is recorded. It is a small sample set, not a full
+art set. The workflow and templates below still govern any expansion.
 
 ## Review one playable sample first
 
@@ -281,7 +284,7 @@ ends. The check now forms a fresh fight until B holds a Strike, before anything
 under test happens, and uses the server's `lastSeq`. That fix and its
 verification are in the following commit.
 
-## Sample 1, polish pass — 1 November 2026 (branch `cc/art-polish`)
+## Sample 1, polish pass — 1 November 2026 (merged in e1fc82c)
 
 Scope: only the adapt items from Sample 1's review, plus the two missing
 roles. No new renderer, no 3D, no rule, size, collision, click-area,
@@ -389,8 +392,20 @@ because the art is pinned to the unchanged logical size.
 | Editable source | The runtime files themselves (plain SVG text). Flash silhouettes derive from them; edit the unit SVG, not the flash. |
 | Export recipe | Same as Sample 1 (`?raw` import, 4x raster via data URL). Silhouettes: same path after a regex pass that whitens every `fill`/`stroke` and removes the shadow ellipse. |
 | Logical size / anchor | mage 24x24, swarm 20x20, ground-b 130x130; centre anchor; viewBox equals logical size. Never used for collision, click area, footprint, formation or save. |
-| Acceptance evidence | Agent review above. No author or player review of the art is recorded. |
+| Acceptance evidence | Agent review above, 1 November 2026, on code `aedc011`. Merged in `e1fc82c` at the author's request and deployed by CI run 41298084435. No author screenshot review, author playtest or player review is recorded. |
 
 README screenshots (`docs/fight-desktop.png`, `docs/fight-phone.png`) were
 replaced with captures of the crowded fight from this pass's code; alt text
 unchanged.
+
+### Deployment
+
+Merged to `main` as `e1fc82c` and pushed; CI
+[run 41298084435](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41298084435)
+passed `check` and `deploy`. Against the deployed app on 1 November 2026,
+`pnpm check:deploy` returned `ok: true` (its `sourceRevision` describes the
+checking checkout, not the server). Server-returned evidence: the deployed
+page serves `world-DuC_I1yk.js`, the same fingerprint as a local `pnpm build`
+of this code, and both deployed README images are byte-identical (SHA-256) to
+the tracked files. No browser play of the deployed art was recorded for this
+pass.
