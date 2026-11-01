@@ -2,15 +2,10 @@
 
 A small card-battle trek for a handful of friends: walk the map, choose which
 enemies to pull into each fight, read their next move, and play your hand.
-Your run is kept on the server for your browser, no account needed.
+It is for people who like a short tactics puzzle (Slay the Spire, Into the
+Breach) and want to stop mid-run and pick it up later, on a laptop or phone.
 
-![A desktop fight against the crowned Warlord, four shield-bearing grunts and a swarmling: each enemy shows its HP and its next attack (ATK 5 on the Warlord, ATK 3 on the grunts), the yellow marker is on the Warlord, and the hooded explorer stands to the right](docs/fight-desktop.png)
-
-## Who it's for
-
-People who like a short tactics puzzle (Slay the Spire, Into the Breach) and
-have ten minutes on a laptop or phone. They want to stop mid-run, pick it up
-later, and think unhurried.
+![A crowded fight against the Warlord on desktop](docs/fight-desktop.png)
 
 ## What good means here
 
@@ -19,117 +14,56 @@ later, and think unhurried.
 1. **Thinking is free.** Nothing happens during your turn until you end it: no
    timers, no regeneration, no enemy moves. *Enforced:* `src/turn.test.ts`,
    `src/combat.test.ts` and a browser check.
-2. **You choose the size and place of every fight.** Loners can be split;
-   a pack (outlined, named above it) chases and joins together. Grunts and
-   elites can be led away and stay where they give up; the Warlord goes home.
-   *Enforced:* `src/encounter.test.ts`, `src/roam.test.ts`. *Judged:*
-   whether it feels predictable.
-3. **Every enemy's next move is readable,** with real numbers: who a mage
-   will revive, what a charge leads to. Nothing overlaps at 1920x1080 or
-   390x844; big fights use a side list instead of shrinking. *Enforced:*
-   `src/combat.test.ts`, `src/formation.test.ts`.
+2. **You choose the size and place of every fight.** Loners can be split; a
+   pack chases and joins together. *Enforced:* `src/encounter.test.ts`,
+   `src/roam.test.ts`. *Judged:* whether it feels predictable.
+3. **Every enemy's next move is readable,** with real numbers. Nothing
+   overlaps at 1920x1080 or 390x844; big fights use a side list instead of
+   shrinking. *Enforced:* `src/combat.test.ts`, `src/formation.test.ts`.
 4. **Each enemy changes your plan.** Swarmlings reward Cleave, a mage makes
-   you choose between it and its grunts, a captain's charge is the time to
-   Guard. *Judged* in play; `tools/balance.ts hand` shows one hand played
-   differently against each group.
+   you choose between it and its grunts. *Judged* in play.
 5. **Fleeing is honest.** Enemies still take their shown actions before you
-   escape, and elites remember their charge. *Enforced:* phase and combat
-   tests.
-6. **Cards never vanish.** The 14-card deck is conserved across every pile.
-   *Enforced:* `src/cards.test.ts`, including 300 random fights.
-7. **Your run is still there tomorrow,** enemies where you left them. The
-   server saves when a fight starts, after you win, flee or fall, and when
-   enemies give up a chase. "Saved" appears only after
-   the server confirms, a run's result is saved before the next starts, and
-   a killed enemy can't come back. *Enforced:* `src/net.test.ts`,
-   `spec/saves.test.ts`, and `tools/persistence-check.sh` (restart, rebuild).
-8. **A phone is a full controller.** Tap to move, tap enemies and cards, with
-   text that stays readable. *Judged, with checks:* `tools/playtest.mjs`
-   plays with touch at 390x844.
+   escape. *Enforced:* phase and combat tests.
+6. **Your run is still there tomorrow.** "Saved" appears only after the
+   server confirms, and a killed enemy can't come back. *Enforced:*
+   `src/net.test.ts`, `spec/saves.test.ts`, `tools/persistence-check.sh`.
 
-![The same Warlord fight on a 390x844 phone: every enemy's HP and next attack stay readable above its body, with End turn, Flee and the hand below](docs/fight-phone.png)
+![The same fight on a 390x844 phone](docs/fight-phone.png)
 
-## This version
+## Playing with a friend
 
-You can explore six camps, fight, flee, die, and come back to a restored
-run. Closing mid-fight returns you to that fight's start. Starting a new run keeps the old one in your history; only "Erase my
-saved data", confirmed by typing ERASE, deletes anything.
+At [the co-op page](/coop.html) you create an expedition and share its invite
+link. There are no accounts: your browser is who you are, so the same browser
+picks up where you left off, while clearing cookies makes you a new person.
+You share one map; walking near a camp pulls in teammates within 320px into
+the same fight. You see each other's position and the fight, but your hand
+stays yours until you play it. *Enforced:* `spec/coop-auth.test.ts`,
+`server/coop/ws.test.ts`. A
+[multi-user test session](multi-user-test-report.md), driven by an agent
+with two independent connections, confirmed joining, late joining and a
+server restart mid-fight. It shows the mechanism works; no human playtest
+with two people has happened yet.
 
-<!-- DRAFT (crit 9, awaiting author confirmation): a friend can now share the
-     map and a fight with you. Wording below is a first pass, not final. -->
-**Co-op (new, crit 9).** At [the co-op page](/coop.html) you can create or
-join a short-lived expedition with a friend, no account needed — a separate
-world from your solo save. You see each other move on one real shared map;
-walking close to a camp together pulls in anyone within 320px of whoever
-actually triggered it (further-off teammates stay free to explore, or start
-their own fight elsewhere). The fight itself runs on the server: everyone
-keeps their own hand and HP and plays cards independently, resolved the
-instant each is played; once everyone still standing has ended their turn,
-the enemies act once from their shown intents. Fleeing or falling is a
-personal choice that doesn't end the fight for the rest of the party, and a
-disconnect mid-fight gets 30 seconds to reconnect before it's resolved as an
-ordinary, costed flee — including a server restart, which resumes an
-in-progress fight exactly (same hands, energy and round) rather than losing
-it. *Enforced:* `src/roam.test.ts`, `src/encounter.test.ts`,
-`src/combat.test.ts`, `src/formation.test.ts`, `server/coop/room.test.ts`,
-`server/coop/fight-session.test.ts`. Movement smoothness is measured (not a
-pass/fail test) with `tools/coop-perf-check.mjs`. *Not yet judged by play*:
-which player an unaimed attack picks (currently the lowest-HP one) is a
-first guess, not a tested one.
+## What I didn't build
 
-Not built yet: accounts, loot, talents; the art is a first sample, not a full set.
-
-**Who's who (new, crit 10).** You and a friend are told apart by your
-browser, not an account — joining from the same browser again (even after
-closing the tab) picks up right where you left off, while a different
-browser, or the same one with its cookies cleared, is a new, separate
-person with no way back to the old one by typing in the same name again.
-Anyone who creates an expedition can hand it to a friend with one invite
-link; share it the way you'd share any link. Inside the expedition, you can
-all see each other's position, name and the shared map and fight state —
-but your own hand, and what you're about to play, stays yours alone until
-you play it. *Enforced:* `spec/coop-auth.test.ts`,
-`server/coop/ws.test.ts`, `tools/coop-log-check.mjs`, and a real
-[multi-user test session](multi-user-test-report.md) driving two
-independent identities over real HTTP/WebSocket — including against the
-actually deployed app — that confirms two users joining, one's action
-reaching the other without a reload, a late joiner seeing the live room
-without disturbing an in-progress fight (13/13), and the same fight/hand
-surviving a real Fly machine restart (7/7). That session is agent-driven
-(the two "people" are two independent HTTP/WebSocket clients, not two real
-people each in a real browser) — it is evidence the mechanism works, not a
-substitute for a human playtest, which is still outstanding.
-
-<!-- DRAFT (crit 10, awaiting author confirmation): whether the shared-map
-     experience actually feels good to play with a friend needs the
-     author's own judgment; nothing below claims that. -->
-**A known limit.** This app runs as one process on one machine with one
-storage volume by design (`fly.toml`); a room's live state lives in that
-process's memory. The same test session confirmed, by actually scaling the
-Fly app to two machines, that this doesn't scale horizontally: two
-machines get two separate volumes, so a room created on one is invisible
-to the other (11 of 20 real join attempts returned 404). This is a known,
-accepted shape for this project, not a bug to fix.
+No accounts, loot or talents. The art is a first sample, not a full set. The
+app runs as one process on one machine with one storage volume; scaling to
+two machines broke joins (11 of 20 returned 404), so that limit is accepted.
 
 ## Where these ideas came from
 
 **My playtests.** v1 let me move during combat, and it felt like an action
-grinder rather than a card game. Locking movement in fights fixed that, but
-real-time enemy attacks then punished reading the hand, so combat became
-strict turns. Crowding made bodies and intents overlap, which led to the
-formation step. Each fix is now a rule or a test above.
+grinder, so combat became strict turns. Crowding made intents overlap, which
+led to the formation step.
 
 **What I read.**
 
 - Robin Sloan, [An app can be a home-cooked meal](https://www.robinsloan.com/notes/home-cooked-app/):
-  software for a few known people can skip accounts. Here that became
-  anonymous cookie saves.
+  software for a few known people can skip accounts, hence cookie identity.
 - [Slay the Spire's development](https://en.wikipedia.org/wiki/Slay_the_Spire):
-  without telegraphed enemy actions, playtesters were "confused about the
-  number of card abilities without any clear situation to apply them", so
-  Mega Crit added Intents. Promise 3 comes from this.
+  telegraphed Intents made card choices meaningful; promise 3 comes from this.
 - Justin Ma on [Into the Breach](https://www.gamedeveloper.com/game-platforms/road-to-the-igf-subset-games-i-into-the-breach-i-):
-  telegraphing so "every death felt like your own fault". That is why
-  fleeing still resolves the shown attacks.
-- [WCAG 2.2 Target Size (Minimum)](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html):
+  "every death felt like your own fault", which is why fleeing still
+  resolves the shown attacks.
+- [WCAG 2.2 Target Size](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html):
   the 24px floor I hold the phone controls well above.
