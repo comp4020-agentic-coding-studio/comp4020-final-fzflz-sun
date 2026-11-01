@@ -1,5 +1,5 @@
 import kaplay from "kaplay";
-import { loadArt, ROLE_SPRITE } from "./art/sprites.ts";
+import { groundTileFor, loadArt, ROLE_SPRITE } from "./art/sprites.ts";
 import { escapeHtml, escapeKaplayText, type CoopClientMsg, type CoopFightMsg, type CoopHandMsg, type CoopServerMsg } from "./coop-protocol.ts";
 import { PLAYER_JOIN_RADIUS } from "./encounter.ts";
 import { formationBounds, layoutFormation, planCamera, type Unit as FormationUnit, type V, type Viewport } from "./formation.ts";
@@ -124,9 +124,9 @@ const ROLE_SIZE: Record<string, number> = { brute: 28, swarm: 20, mage: 24, heav
 const GROUND_TILE = 130;
 for (let gy = 0; gy < WORLD_HEIGHT; gy += GROUND_TILE) {
   for (let gx = 0; gx < WORLD_WIDTH; gx += GROUND_TILE) {
-    const i = gx / GROUND_TILE, j = gy / GROUND_TILE;
+    const g = groundTileFor(gx / GROUND_TILE, gy / GROUND_TILE);
     // same tile and flip pattern as src/main.ts, anchored at the cell centre
-    k.add([k.sprite("ground", { width: GROUND_TILE, height: GROUND_TILE, flipX: (i + j) % 2 === 1, flipY: (i * 3 + j) % 4 >= 2 }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
+    k.add([k.sprite(g.sprite, { width: GROUND_TILE, height: GROUND_TILE, flipX: g.flipX, flipY: g.flipY }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
   }
 }
 for (const a of AREAS) {

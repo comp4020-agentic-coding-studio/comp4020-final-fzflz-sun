@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="130" height="130" viewBox="0 0 130 130">
+  <!-- Ground tile B, original. Same palette and density as tile A, different
+       positions and a hair darker, so neighbouring cells don't repeat. -->
+  <rect width="130" height="130" fill="#1d211e"/>
+  <g fill="#212520">
+    <circle cx="40" cy="14" r="2.4"/><circle cx="96" cy="34" r="3"/><circle cx="18" cy="66" r="2.6"/>
+    <circle cx="66" cy="96" r="2.2"/><circle cx="118" cy="118" r="2.4"/><circle cx="78" cy="62" r="2"/>
+  </g>
+  <g stroke="#252b23" stroke-width="1.4" stroke-linecap="round" fill="none">
+    <path d="M60 36 l-2 -4 M62 36 l0 -5 M64 36 l2 -4"/>
+    <path d="M24 112 l-2 -4 M26 112 l0 -5 M28 112 l2 -4"/>
+  </g>
+</svg>
