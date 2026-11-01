@@ -1,5 +1,5 @@
 import kaplay from "kaplay";
-import { loadArt, ROLE_SPRITE } from "./art/sprites.ts";
+import { groundTileFor, loadArt, ROLE_SPRITE } from "./art/sprites.ts";
 import {
   HAND_SIZE,
   type CardDef,
@@ -286,9 +286,9 @@ function floatText(pos: Vec2, msg: string, color: Color) {
 const GROUND_TILE = 130;
 for (let gy = 0; gy < WORLD_HEIGHT; gy += GROUND_TILE) {
   for (let gx = 0; gx < WORLD_WIDTH; gx += GROUND_TILE) {
-    const i = gx / GROUND_TILE, j = gy / GROUND_TILE;
+    const g = groundTileFor(gx / GROUND_TILE, gy / GROUND_TILE);
     // anchored at the tile centre so flips stay inside the same cell
-    k.add([k.sprite("ground", { width: GROUND_TILE, height: GROUND_TILE, flipX: (i + j) % 2 === 1, flipY: (i * 3 + j) % 4 >= 2 }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
+    k.add([k.sprite(g.sprite, { width: GROUND_TILE, height: GROUND_TILE, flipX: g.flipX, flipY: g.flipY }), k.pos(gx + GROUND_TILE / 2, gy + GROUND_TILE / 2), k.anchor("center"), k.z(-100)]);
   }
 }
 for (const p of [
@@ -386,11 +386,16 @@ function spawnEnemy(spec: SpawnSpec) {
     },
   ]);
   // added before the labels so HP / intent / tag text draws above the art
-  if (art) enemy.add([k.sprite(art, { width: size, height: size }), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyArt"]);
+  if (art) {
+    enemy.add([k.sprite(art, { width: size, height: size }), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyArt"]);
+    // hit flash: the same figure as a white silhouette, normally invisible.
+    // Not in the per-frame dimming loop's tag list, which would turn it on.
+    enemy.add([k.sprite(`${art}-flash`, { width: size, height: size }), k.anchor("center"), k.opacity(0), "enemyFlash"]);
+  }
   enemy.add([k.text(String(spec.hp), { size: def.tier === "boss" ? 16 : 13 }), k.pos(0, lab.hp), k.anchor("center"), k.color(255, 255, 255), k.opacity(1), "enemyHpLabel"]);
   enemy.add([k.text("", { size: 14, align: "center" }), k.pos(0, lab.intent), k.anchor("center"), k.color(255, 210, 80), k.opacity(1), "enemyStateLabel"]);
   if (def.tier === "elite") enemy.add([k.text("ELITE", { size: 12 }), k.pos(0, lab.tag), k.anchor("center"), k.color(GOLD), k.opacity(1), "enemyTagLabel"]);
-  if (spec.role === "mage") enemy.add([k.text("+", { size: 18 }), k.pos(0, 1), k.anchor("center"), k.color(10, 40, 40), k.opacity(1), "enemyGlyph"]);
+  if (spec.role === "mage" && !art) enemy.add([k.text("+", { size: 18 }), k.pos(0, 1), k.anchor("center"), k.color(10, 40, 40), k.opacity(1), "enemyGlyph"]);
   enemy.onClick(() => selectTarget(enemy));
   return enemy;
 }
@@ -461,13 +466,13 @@ const artOf = (e: Enemy) => e.get("enemyArt")[0] as unknown as { color: Color; o
 
 /**
  * Body tint: the art child when the role has a sprite, else the rect. A sprite
- * is drawn in its own colours, so "normal" is white; color() multiplies and
- * can't brighten, so a hit on a sprite flashes as a cold blue-white instead.
+ * is drawn in its own colours, so "normal" is white; its hit flash is the
+ * white overlay in flash(), not a tint.
  * Opacity is owned by the per-frame dimming loop, not set here.
  */
 function tintBody(e: Enemy, mode: "normal" | "down" | "hit") {
   const art = artOf(e);
-  if (art) art.color = mode === "down" ? k.rgb(110, 110, 116) : mode === "hit" ? k.rgb(150, 190, 255) : k.rgb(255, 255, 255);
+  if (art) art.color = mode === "down" ? k.rgb(110, 110, 116) : k.rgb(255, 255, 255);
   else e.color = mode === "down" ? DOWN_COLOR : mode === "hit" ? k.rgb(255, 255, 255) : ROLE_COLOR[e.role];
 }
 
@@ -477,10 +482,31 @@ function showDowned(e: Enemy, down: boolean) {
   refreshIntentLabel(e);
 }
 
+/**
+ * A hit: a sprite gets its white silhouette laid over it and faded out over
+ * HIT_FLASH_DURATION (color() multiplies and cannot brighten a sprite); a
+ * plain square keeps its old white tint.
+ */
 function flash(e: Enemy) {
-  tintBody(e, "hit");
-  k.wait(HIT_FLASH_DURATION, () => {
-    if (e.exists()) tintBody(e, e.unit.downed ? "down" : "normal");
+  const overlay = e.get("enemyFlash")[0] as unknown as { opacity: number } | undefined;
+  if (!overlay) {
+    tintBody(e, "hit");
+    k.wait(HIT_FLASH_DURATION, () => {
+      if (e.exists()) tintBody(e, e.unit.downed ? "down" : "normal");
+    });
+    return;
+  }
+  const start = k.time();
+  const peak = artOf(e)?.opacity ?? 1;
+  overlay.opacity = peak;
+  const fade = k.onUpdate(() => {
+    const t = (k.time() - start) / HIT_FLASH_DURATION;
+    if (!e.exists() || t >= 1) {
+      overlay.opacity = 0;
+      fade.cancel();
+      return;
+    }
+    overlay.opacity = peak * (1 - t);
   });
 }
 function flashPlayer() {

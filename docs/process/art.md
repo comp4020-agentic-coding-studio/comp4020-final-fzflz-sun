@@ -280,3 +280,117 @@ player correctly blocks the round from resolving until their reconnect window
 ends. The check now forms a fresh fight until B holds a Strike, before anything
 under test happens, and uses the server's `lastSeq`. That fix and its
 verification are in the following commit.
+
+## Sample 1, polish pass — 1 November 2026 (branch `cc/art-polish`)
+
+Scope: only the adapt items from Sample 1's review, plus the two missing
+roles. No new renderer, no 3D, no rule, size, collision, click-area,
+footprint or save change. Art stays a child sprite pinned to the logical
+size; the style contract above is unchanged.
+
+### What changed
+
+- `grunt.svg` redrawn bolder: a broad red body and head carry the shape, the
+  round shield is smaller and secondary, and the outline is thicker (2.5) so the
+  figure still reads at about 18 screen px.
+- Ground: `ground.svg` redrawn as low-contrast speckle and grass tufts, with no
+  band or large blobs; new second tile `ground-b.svg`. `groundTileFor(i, j)` in
+  `sprites.ts` picks the tile and flips from an integer hash of the cell, the
+  same in solo and co-op, so neither rows nor diagonals repeat.
+- Hit flash: `sprites.ts` builds a white silhouette of each unit SVG at load
+  time (fills and strokes made white, contact shadow dropped) and loads it as
+  `<name>-flash`. Each enemy with art gets that silhouette as a second child at
+  the same logical size, with opacity 0; `flash()` in `main.ts` sets it to the
+  art's current opacity and fades it to 0 over `HIT_FLASH_DURATION` (0.15 s).
+  Units without art keep the old tint flash.
+- New `mage.svg` (24x24, teal hooded robe with a staff) and `swarm.svg`
+  (20x20, orange many-legged bug); `ROLE_SPRITE` now covers every role. The
+  mage's `+` glyph is drawn only when it has no art, since the staff carries
+  the cue.
+
+### Sample review
+
+```text
+Date / reviewer / build commit: 1 November 2026 / Claude Code (agent), not
+  the author or a player / reviewed on top of ef21561 (commit below).
+Sample assets / style contract: grunt.svg (redrawn), ground.svg (redrawn),
+  ground-b.svg, mage.svg, swarm.svg, plus generated flash silhouettes;
+  contract unchanged.
+Encounters and viewports inspected (headless Chrome, local dev server):
+  - crowded fight ?fight=3,1 (Warlord + pack + grunts + swarmling),
+    1920x1080 and 390x844
+  - simple fight ?fight=1,0 and elite fight ?fight=group:ridge, both viewports
+  - the 33-enemy overflow fight from playtest, 960x540
+  - north camp (mage + grunts) at 1920x1080 and 390x844, and the mage revive
+    intent (playtest monsters suite)
+  - Cleave hit flash and a downed body, 1280x800
+  - co-op shared map with two players and a co-op fight, 1280x800
+Role recognition / intent readability / targeting / effects observations:
+  - Grunt: body and head read first, shield second; in the overflow fight it
+    still reads as a small figure with a shield rather than a blob. Simple at
+    that size by design.
+  - Mage and swarmling are now figures, not squares, and are told apart from
+    grunts by silhouette as well as hue. SHOOT 2 and REVIVE +3 intents and
+    the revive target line ("Mage (north-mage) will revive Grunt (north-1)")
+    stay fully readable above them.
+  - Ground: no horizontal band at exploration or fight zoom. A faint tile
+    edge is still just perceptible between the two variants on a large
+    screen; it stays behind units and text.
+  - Hit flash: a short white silhouette of the exact figure, clearly brighter
+    than the sprite, then fading; a downed (dimmed) unit flashes at its own
+    lower opacity. The floating damage number is unchanged.
+  - Player hit feedback is still the red tint on the player sprite (not part
+    of this pass).
+  - Footprints, slots, labels and click areas unchanged (art drawn at logical
+    size); playtest layout checks pass.
+  - No page exceptions or console errors in any inspected run.
+Candidate decisions and reasons:
+  - grunt.svg: accept — readable at fight zoom and in the overflow fight.
+  - ground.svg + ground-b.svg: accept — band gone; faint tile edge noted.
+  - white-silhouette hit flash: accept — restores a brightening hit cue.
+  - mage.svg, swarm.svg: accept — visual set now consistent, no squares left
+    in normal play.
+  - intent icons and card frame: still deferred (same reason as Sample 1).
+Adjustments and recheck result: grunt redrawn twice (the first redraw let the
+  shield dominate); ground redrawn twice (the first rework made a lattice of
+  light spots); flash peak raised to the art's full opacity after it looked
+  washed out. Each rechecked at both viewports.
+Remaining art work: intent icons (with a readability review); card frame;
+  a player hit flash matching the enemy one; softening the faint tile edge;
+  an author review and a play review of the art.
+```
+
+### Checks run
+
+Local dev server on :8080, 1 November 2026, on the final code of this pass:
+
+- `pnpm typecheck`: clean.
+- `pnpm test:unit`: 451 passed (17 files).
+- `APP_URL=http://127.0.0.1:8080 pnpm check`: 472 passed.
+- `node tools/playtest.mjs --suite=combat,viewports --headless`: 117 ok,
+  0 failed (crowded, overflow and real fights at 1920x1080 and 390x844).
+- `node tools/playtest.mjs --suite=monsters,groups --headless`: 62 ok,
+  0 failed (packs, mage revive, elite cycle, every camp at both viewports).
+- Screenshot runs over CDP: 0 page errors.
+- `pnpm build`: the new SVGs are bundled into `dist/assets/world-*.js`.
+
+The playtest footprint checks use the declared boxes, not pixels; they hold
+because the art is pinned to the unchanged logical size.
+
+### Asset record additions
+
+| Field | Value |
+| --- | --- |
+| Runtime file(s) | `src/art/ground-b.svg`, `mage.svg`, `swarm.svg` (new); `grunt.svg`, `ground.svg` (redrawn); `<unit>-flash` sprites generated at load by `silhouette()` in `src/art/sprites.ts` (no file) |
+| Author / creation source | Original, hand-written SVG authored for this repository by Claude Code on 1 November 2026 at the author's request. No generator, pack or reference image. |
+| Original source | None external; the tracked files are the source. |
+| License / attribution | Same terms as this repository's own code. No third-party content. |
+| Modifications | grunt and ground each redrawn twice during this review (see above). |
+| Editable source | The runtime files themselves (plain SVG text). Flash silhouettes derive from them; edit the unit SVG, not the flash. |
+| Export recipe | Same as Sample 1 (`?raw` import, 4x raster via data URL). Silhouettes: same path after a regex pass that whitens every `fill`/`stroke` and removes the shadow ellipse. |
+| Logical size / anchor | mage 24x24, swarm 20x20, ground-b 130x130; centre anchor; viewBox equals logical size. Never used for collision, click area, footprint, formation or save. |
+| Acceptance evidence | Agent review above. No author or player review of the art is recorded. |
+
+README screenshots (`docs/fight-desktop.png`, `docs/fight-phone.png`) were
+replaced with captures of the crowded fight from this pass's code; alt text
+unchanged.
