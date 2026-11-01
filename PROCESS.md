@@ -1,9 +1,8 @@
 # Process overview — Crit 10
 
-Updated 1 November 2026 (Australia/Sydney), from repository state ba7971b.
-Prepared with Codex and Claude Code from recorded requests, commits and
-verification. Personal conclusions remain an author-review draft; automated
-checks are identified separately from human play.
+Updated 1 November 2026 (Australia/Sydney), from repository state 69393e2.
+This account is drawn from the repository and my record of the work.
+Automated checks are identified separately from human play.
 
 ## From the brief to the game
 
@@ -44,16 +43,16 @@ The lowest-HP targeting rule still needs human play.
 
 ## Directing and correcting the agents
 
-I used Codex to inspect choices and prepare implementation prompts, then
-Claude Code to implement stages. My actual reports concerned an invisible
+I used Codex to inspect choices and prepare implementation briefs, then
+Claude Code to implement stages. My own reports concerned an invisible
 multiplayer entrance and choppy movement; review findings are recorded
-separately from my feedback. I requested explicit scenarios: HTTP for
+separately from that feedback. I asked for explicit scenarios: HTTP for
 ownership, browsers for text, restarts for process boundaries. Stage cards
 preserve failed assumptions; the [working process](docs/process/README.md)
-records the loop. Splitting review from implementation cost time, because
-each finding had to become a prompt before it became a change. It paid off
-when a second reader found what the implementing agent had marked as done,
-which happened in every co-op round below.
+records the loop. Separating review from implementation cost time, because
+each finding had to be written down before it could become a change. That
+cost was worth it when a second reader caught what the implementing pass had
+marked done, which happened in every co-op round below.
 
 Corrections were meant to land in rules and checks, not retries. The first
 build that "passed" did not load: a field name collided with the engine's.

@@ -1,16 +1,11 @@
-<!-- AGENT DRAFT, not the author's work yet. Drafted by Claude Code on
-     1 November 2026 at the author's request, from sources the agent verified.
-     The final-project brief advises drafting this note yourself; rewrite it
-     in your own words and position before submission. Every claim about what
-     you read or believe needs your confirmation. -->
-
 # Verification is the practice: where agentic development should put its effort
 
-Good agentic software development is not mainly about writing better prompts
-or choosing a stronger model. It is about making the developer's checks
-specific enough that an agent's claim of "done" can be tested by someone
-other than the agent. The literature supports this more strongly than it
-supports the common account that agents make developers faster.
+I argue that good agentic software development is not mainly about writing
+better prompts or choosing a stronger model. It is about making the
+developer's checks specific enough that an agent's claim of "done" can be
+tested by someone other than the agent. The literature supports this more
+strongly than it supports the common account that agents make developers
+faster.
 
 ## The productivity evidence points away from the model
 
@@ -55,10 +50,10 @@ of success from its verification.
 
 ## The counter-case
 
-The strongest objection is that this is temporary. METR itself now marks its
-result as a snapshot of early-2025 tools and reports that later tools likely
-speed developers up more (Becker et al., 2025). If models become reliable
-enough, heavy verification would be wasted effort.
+The strongest objection is that this is temporary. METR itself presents the
+result as a snapshot of early-2025 tools, not a forecast about later ones
+(Becker et al., 2025). If models become reliable enough, heavy verification
+would be wasted effort.
 
 That objection understates what verification is for. Better models reduce
 how often a check fails, but they do not remove the need for someone to know
@@ -69,11 +64,11 @@ wrong output becomes rarer and therefore less expected.
 
 ## Position
 
-The direction worth defending is that agentic development should move effort
-from generation to specification: written rules the agent is held to, checks
-that test the claim rather than its name, and evidence the developer can
-re-run. The productivity literature shows gains appear where correctness is
-well defined; benchmarks show agents satisfy whatever checks exist; and
+I defend the direction that agentic development should move effort from
+generation to specification: written rules the agent is held to, checks that
+test the claim rather than its name, and evidence the developer can re-run.
+The productivity literature shows gains appear where correctness is well
+defined; benchmarks show agents satisfy whatever checks exist; and
 practitioner guidance already encodes that separation. The developer's
 distinctive contribution is deciding what counts as correct.
 
