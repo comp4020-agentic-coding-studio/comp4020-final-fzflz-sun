@@ -41,8 +41,11 @@ stays yours until you play it. *Enforced:* `spec/coop-auth.test.ts`,
 `server/coop/ws.test.ts`. A
 [multi-user test session](multi-user-test-report.md), driven by an agent
 with two independent connections, confirmed joining, late joining and a
-server restart mid-fight. It shows the mechanism works; no human playtest
-with two people has happened yet.
+server restart mid-fight. In the last week before submission, three people in
+three Chrome profiles played the deployed build: they joined from the invite
+link, saw each other move, shared a fight, and tested late join, leave and
+return, and room isolation. The only friction was the invite-link button: we
+expected a short code and got the whole URL; we left it unchanged.
 
 ## What I didn't build
 

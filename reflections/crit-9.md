@@ -27,7 +27,7 @@ A multiplayer feature needs a clear entrance, responsive movement and
 understandable shared consequences, as well as working server logic.
 
 This also sharpened the evidence habit from Crit 8. My feedback, agent-run
-checks and a human playtest would serve different purposes. Successful
+checks and a human playtest serve different purposes. Successful
 restart checks cover specific scenarios; review still found HP and ready-state
 gaps. I want to ask what a check establishes before accepting a broad claim
 such as "recovery works exactly."

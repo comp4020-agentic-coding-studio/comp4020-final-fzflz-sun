@@ -35,7 +35,11 @@ machine restart (7/7), late join (13/13) and a captured log stream; it also
 found the queued-flee and ending-panel gaps. The project has since deployed
 `1ea1de8`.
 
-That is evidence the mechanism works, not evidence that two people enjoy
-playing. I have not yet played the deployed game with another person. The
-agent-driven test and a real two-person playtest answer different questions,
-and the latter remains outstanding.
+In the last week before submission, three people in three Chrome profiles
+played the deployed co-op build. We joined from the invite link, saw each
+other move, shared a fight, and tested late join, leave and return, and room
+isolation. Nothing broke. The only friction was the copy-link button: I
+expected a short invite code and got the whole URL. That is a wording issue,
+not a behaviour bug, and I left it unchanged. The agent-driven sessions had
+already shown the mechanism; this showed the experience held up with three
+people and gave me the judgment the logs could not.

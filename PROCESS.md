@@ -1,6 +1,6 @@
 # Process overview — Crit 10
 
-Updated 1 November 2026 (Australia/Sydney), from repository state 1ea1de8.
+Updated 8 November 2026 (Australia/Sydney), from repository state 1ea1de8.
 This account is drawn from the repository and my record of the work.
 Automated checks are identified separately from human play.
 
@@ -143,9 +143,7 @@ fixed them ([record](docs/process/2026-10-21-c10-post-fix-verification.md)).
 
 ## Current evidence and its limits
 
-The full suite runs 472 tests. A first art sample was merged in
-[a2f7a0c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/a2f7a0c)
-([record](docs/process/art.md)). The next CI run then failed on a check that
+The full suite runs 472 tests. The next CI run then failed on a check that
 assumed a lucky hand;
 [ba7971b](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/ba7971b)
 fixed the check rather than retrying it, and
@@ -155,19 +153,20 @@ passed and deployed `ba7971b`.
 A slow-network check
 ([a8f8bfa](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/a8f8bfa),
 [record](docs/process/2026-11-01-coop-slow-network-check.md)) ran three times
-against a local production build: on Fast 3G, movement took about 0.53–0.61 s
-and a round about 0.49 s; on Slow 3G, 1.02–1.12 s and 1.00–1.04 s; reconnects
-took 3.33–3.90 s. It found no app bug; it is a local simulation, not a real
-mobile network, and is not in CI. An art polish
+against a local production build: movement took 0.53–0.61 s on Fast 3G and
+1.02–1.12 s on Slow 3G, rounds 0.49 s and 1.00–1.04 s, reconnects 3.33–3.90 s.
+It found no app bug; it is a local simulation, not a real network or CI. An
+art polish
 ([aedc011](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/aedc011), merged in
-[e1fc82c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/e1fc82c)) added a bolder grunt,
+[e1fc82c](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/e1fc82c);
+[record](docs/process/art.md)) added a bolder grunt,
 non-repeating ground, a white hit flash and mage and swarmling sprites, and
 updated the README screenshots. No author or player has reviewed the art.
 
 ## Next judgment
 
-The one thing not recorded anywhere here is a human two-person playtest,
-narrated from the logs. Agent-driven sessions show the mechanism works; they
-do not show whether playing together is good. The
-[C10 reflection](reflections/crit-10.md) records that distinction; a human
-playtest has not happened.
+In the last week before submission, three people in three Chrome profiles
+played the deployed co-op build: they joined from the invite link, saw each
+other move, shared a fight, and tested late join, leave and return, and room
+isolation. No bug was found; the only friction was expecting a short code at
+the copy-link button and getting a full URL, which was left unchanged.
