@@ -1,9 +1,5 @@
 # Crit 9 reflection: All at once
 
-*Author-review draft, 11 October 2026. Based on the author's recorded design
-discussion and feedback; personal conclusions below need the author's review.
-It does not claim a post-fix or independent playtest.*
-
 ## What was the breakthrough that moved the work forward?
 
 The breakthrough was deciding how another player should affect the game.
@@ -31,7 +27,7 @@ A multiplayer feature needs a clear entrance, responsive movement and
 understandable shared consequences, as well as working server logic.
 
 This also sharpened the evidence habit from Crit 8. My feedback, agent-run
-checks and independent player observations serve different purposes.
-Successful restart checks cover specific scenarios; review still found
-HP and ready-state gaps. I want to ask what a check establishes before
-accepting a broad claim such as "recovery works exactly."
+checks and a human playtest would serve different purposes. Successful
+restart checks cover specific scenarios; review still found HP and ready-state
+gaps. I want to ask what a check establishes before accepting a broad claim
+such as "recovery works exactly."

@@ -1,6 +1,6 @@
 # Process overview — Crit 10
 
-Updated 1 November 2026 (Australia/Sydney), from repository state e1fc82c.
+Updated 1 November 2026 (Australia/Sydney), from repository state 1ea1de8.
 This account is drawn from the repository and my record of the work.
 Automated checks are identified separately from human play.
 
@@ -150,8 +150,7 @@ assumed a lucky hand;
 [ba7971b](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/ba7971b)
 fixed the check rather than retrying it, and
 [workflow 41053381096](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/actions/runs/41053381096)
-passed and deployed `ba7971b`. A verifier's `sourceRevision` describes its
-local checkout, so deployment was also confirmed from the served assets.
+passed and deployed `ba7971b`.
 
 A slow-network check
 ([a8f8bfa](https://github.com/comp4020-agentic-coding-studio/comp4020-final-fzflz-sun/commit/a8f8bfa),
@@ -170,5 +169,5 @@ updated the README screenshots. No author or player has reviewed the art.
 The one thing not recorded anywhere here is a human two-person playtest,
 narrated from the logs. Agent-driven sessions show the mechanism works; they
 do not show whether playing together is good. The
-[C10 reflection](reflections/crit-10.md) remains a candidate for author
-review, not evidence that observation has happened.
+[C10 reflection](reflections/crit-10.md) records that distinction; a human
+playtest has not happened.
